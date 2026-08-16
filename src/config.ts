@@ -1,0 +1,34 @@
+export interface ServiceConfig {
+  host: string;
+  port: number;
+  redisUrl: string;
+  shutdownTimeoutMs: number;
+}
+
+function integer(name: string, value: string | undefined, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > maximum) {
+    throw new Error(`${name}은 0보다 크고 ${maximum} 이하인 정수여야 합니다`);
+  }
+  return parsed;
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
+  const redisUrl = env.REDIS_URL?.trim() || "redis://localhost:14091";
+  let parsedRedisUrl: URL;
+  try {
+    parsedRedisUrl = new URL(redisUrl);
+  } catch {
+    throw new Error("REDIS_URL 형식이 올바르지 않습니다");
+  }
+  if (!new Set(["redis:", "rediss:"]).has(parsedRedisUrl.protocol)) {
+    throw new Error("REDIS_URL은 redis:// 또는 rediss:// 스킴이어야 합니다");
+  }
+
+  return {
+    host: env.HOST?.trim() || "0.0.0.0",
+    port: integer("PORT", env.PORT, 1234, 65_535),
+    redisUrl,
+    shutdownTimeoutMs: integer("SHUTDOWN_TIMEOUT_MS", env.SHUTDOWN_TIMEOUT_MS, 10_000),
+  };
+}
