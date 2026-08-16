@@ -37,6 +37,9 @@ const server = new Server({
   address: config.host,
   port: config.port,
   name: `collaboration-${process.pid}`,
+  quiet: true,
+  // Hocuspocus 내장 signal handler와 경합하지 않고 아래 flush→DB/Redis close 순서를 단일 소유한다.
+  stopOnSignals: false,
   extensions: [
     new Database({
       fetch: ({ documentName }) => documents.fetch(documentName),

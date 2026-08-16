@@ -39,6 +39,9 @@ pnpm build
 pnpm start
 ```
 
+컨테이너는 내부 포트 `9150`을 사용하며 non-root `node` 사용자로 실행됩니다. `/health` HTTP 200과
+WebSocket은 같은 Hocuspocus listener를 공유합니다.
+
 | 변수 | 기본값 | 설명 |
 |---|---:|---|
 | `HOST` | `0.0.0.0` | bind 주소 |
