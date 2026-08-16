@@ -15,8 +15,9 @@ Spring REST 트래픽과 분리하고, wiki-backend가 EDIT 권한 확인 후 �
 - SIGTERM/SIGINT graceful shutdown
 
 page revision과 shared draft base/generation 전환은 wiki-backend의 단일 PostgreSQL transaction으로
-연결했고, 프론트 본문·제목은 같은 Y.Doc을 사용합니다. Redis 다중 노드 fan-out, 메트릭과 장애 복구
-검증이 다음 증분이며, 이 작업이 끝나기 전까지 production 기능 플래그를 켜지 않습니다.
+연결했고, 프론트 본문·제목은 같은 Y.Doc을 사용합니다. 실제 nginx 경로에서 단절 중 동시
+제목·서식·표 편집 수렴과 프로세스 재기동 후 PostgreSQL 복구를 검증했습니다. Redis 다중 노드
+fan-out, 메트릭과 2인 브라우저 caret UX가 남아 있어 production 기능 플래그는 아직 켜지 않습니다.
 
 ## 인증 흐름
 
