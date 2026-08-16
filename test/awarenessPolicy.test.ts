@@ -54,6 +54,23 @@ describe("authoritative awareness policy", () => {
     });
   });
 
+  it("소유권을 아직 확인할 수 없는 초기 빈 awareness는 중계하지 않는다", () => {
+    const states = new Map([[123, {}]]);
+    expect(apply(states)).toEqual({ accepted: true });
+    expect(states.size).toBe(0);
+  });
+
+  it("Hocuspocus decoder의 synthetic 빈 state를 버리고 실제 state만 처리한다", () => {
+    const states = new Map([
+      [999, {}],
+      [123, { user: { id: "999", name: "Mallory" } }],
+    ]);
+    expect(apply(states)).toEqual({ accepted: true });
+    expect(states).toEqual(new Map([[123, {
+      user: { id: "42", name: "Alice", color: "#0c66e4" },
+    }]]));
+  });
+
   it("같은 connection의 후속 update는 처음 등록한 clientId만 허용한다", () => {
     const states = new Map([[124, { user: { id: "42" } }]]);
     expect(apply(states, new Set([123]))).toEqual({
@@ -62,12 +79,22 @@ describe("authoritative awareness policy", () => {
     });
   });
 
-  it("다른 connection이 이미 쓰는 clientId 탈취를 거부한다", () => {
+  it("QueryAwareness가 되돌려 보낸 다른 connection의 state는 다시 적용하지 않는다", () => {
     const states = new Map([[123, { user: { id: "42" } }]]);
-    expect(apply(states, new Set(), new Set([123]))).toEqual({
-      accepted: false,
-      reason: "CLIENT_ID_OWNERSHIP",
-    });
+    expect(apply(states, new Set(), new Set([123]))).toEqual({ accepted: true });
+    expect(states.size).toBe(0);
+  });
+
+  it("자기 state와 QueryAwareness의 원격 echo가 함께 와도 자기 identity만 강제한다", () => {
+    const states = new Map([
+      [123, { user: { id: "999" } }],
+      [456, { user: { id: "43", name: "Bob" } }],
+    ]);
+    expect(apply(states, new Set([123]), new Set([123, 456])))
+      .toEqual({ accepted: true });
+    expect(states).toEqual(new Map([[123, {
+      user: { id: "42", name: "Alice", color: "#0c66e4" },
+    }]]));
   });
 
   it("한 connection이 여러 awareness identity를 만드는 update를 거부한다", () => {

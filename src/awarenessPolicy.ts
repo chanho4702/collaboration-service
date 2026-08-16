@@ -46,6 +46,8 @@ interface CursorState {
   head: RelativePosition;
 }
 
+const INVALID_CURSOR = Symbol("INVALID_CURSOR");
+
 function participantColor(id: number): string {
   let hash = 0;
   for (const char of String(id)) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
@@ -92,12 +94,12 @@ function relativePosition(value: unknown): RelativePosition | null {
   return { type, tname, item, assoc: assoc as number };
 }
 
-function cursorState(value: unknown): CursorState | null | undefined {
-  if (value === undefined || value === null) return value;
-  if (!isRecord(value)) return undefined;
+function cursorState(value: unknown): CursorState | null | typeof INVALID_CURSOR {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) return INVALID_CURSOR;
   const anchor = relativePosition(value.anchor);
   const head = relativePosition(value.head);
-  if (!anchor || !head) return undefined;
+  if (!anchor || !head) return INVALID_CURSOR;
   return { anchor, head };
 }
 
@@ -117,7 +119,33 @@ export function applyAuthoritativeAwareness(
   } = input;
   if (!context) return { accepted: false, reason: "MISSING_CONTEXT" };
   if (context.room !== documentName) return { accepted: false, reason: "ROOM_MISMATCH" };
-  if (states.size > 1) return { accepted: false, reason: "MULTIPLE_CLIENT_IDS" };
+
+  // Hocuspocus 4.6의 inbound decoder는 임시 Awareness를 만들 때 생기는 빈 local state도 Map에
+  // 포함한다. 아직 문서/connection이 소유하지 않은 완전한 빈 state는 wire payload가 아니므로 제거한다.
+  // 실제 클라이언트의 초기 빈 state도 함께 빠질 수 있지만, 다음 user/cursor update에서 정상 등록된다.
+  for (const [clientId, state] of states) {
+    if (
+      !connectionClientIds.has(clientId)
+      && !documentClientIds.has(clientId)
+      && isRecord(state)
+      && Object.keys(state).length === 0
+    ) states.delete(clientId);
+  }
+
+  // QueryAwareness 응답은 이 클라이언트가 서버에서 받은 다른 참여자의 state까지 되돌려 보낸다.
+  // 이미 문서에 있고 이 connection 소유가 아닌 ID는 정상 echo이므로 버리고, 새 ID만 소유권 검사한다.
+  const newClientIds: number[] = [];
+  for (const clientId of states.keys()) {
+    if (connectionClientIds.has(clientId)) continue;
+    if (documentClientIds.has(clientId)) states.delete(clientId);
+    else newClientIds.push(clientId);
+  }
+  if (connectionClientIds.size > 1 || newClientIds.length > 1) {
+    return { accepted: false, reason: "MULTIPLE_CLIENT_IDS" };
+  }
+  if (connectionClientIds.size > 0 && newClientIds.length > 0) {
+    return { accepted: false, reason: "CLIENT_ID_OWNERSHIP" };
+  }
 
   for (const [clientId, state] of states) {
     const ownsClientId = connectionClientIds.has(clientId);
@@ -125,7 +153,6 @@ export function applyAuthoritativeAwareness(
       !Number.isSafeInteger(clientId)
       || clientId < 0
       || clientId > 0xffff_ffff
-      || (connectionClientIds.size > 0 && !ownsClientId)
       || (!ownsClientId && documentClientIds.has(clientId))
     ) {
       return { accepted: false, reason: "CLIENT_ID_OWNERSHIP" };
@@ -133,7 +160,7 @@ export function applyAuthoritativeAwareness(
     if (!isRecord(state)) return { accepted: false, reason: "INVALID_STATE" };
 
     const cursor = cursorState(state.cursor);
-    if (cursor === undefined) return { accepted: false, reason: "INVALID_CURSOR" };
+    if (cursor === INVALID_CURSOR) return { accepted: false, reason: "INVALID_CURSOR" };
     states.set(clientId, {
       ...(cursor === null ? {} : { cursor }),
       user: {
