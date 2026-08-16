@@ -1,0 +1,9 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 9770515..4f8d1fe 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -1,3 +1,3 @@
+ import { Extension, Hocuspocus, RedisTransactionOrigin, afterLoadDocumentPayload, afterStoreDocumentPayload, afterUnloadDocumentPayload, beforeBroadcastStatelessPayload, beforeUnloadDocumentPayload, onAwarenessUpdatePayload, onChangePayload, onConfigurePayload, onStoreDocumentPayload } from "@hocuspocus/server";
+ import { ExecutionResult, Lock, Redlock } from "@sesamecare-oss/redlock";
+-import RedisClient, { Cluster, ClusterNode, ClusterOptions, RedisOptions } from "ioredis";
++import { Redis as RedisClient, Cluster, ClusterNode, ClusterOptions, RedisOptions } from "ioredis";

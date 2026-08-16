@@ -1,10 +1,19 @@
 export interface ServiceConfig {
   host: string;
   port: number;
+  instanceId: string;
   redisUrl: string;
   databaseUrl: string;
   maxDocumentBytes: number;
   shutdownTimeoutMs: number;
+}
+
+function instanceId(value: string | undefined): string {
+  const candidate = value?.trim() || `collaboration-${process.pid}`;
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(candidate)) {
+    throw new Error("COLLABORATION_INSTANCE_ID는 영문·숫자·점·밑줄·하이픈 128자 이하여야 합니다");
+  }
+  return candidate;
 }
 
 function integer(name: string, value: string | undefined, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
@@ -41,6 +50,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
   return {
     host: env.HOST?.trim() || "0.0.0.0",
     port: integer("PORT", env.PORT, 19_150, 65_535),
+    instanceId: instanceId(env.COLLABORATION_INSTANCE_ID ?? env.HOSTNAME),
     redisUrl,
     databaseUrl,
     maxDocumentBytes: integer("MAX_DOCUMENT_BYTES", env.MAX_DOCUMENT_BYTES, 10 * 1024 * 1024),

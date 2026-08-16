@@ -9,6 +9,7 @@ Spring REST 트래픽과 분리하고, wiki-backend가 EDIT 권한 확인 후 �
 - Redis `GETDEL` 기반 opaque ticket 1회 소비
 - v1 payload schema·EDIT 권한·`page:<id>` room·만료 재검증
 - PostgreSQL `bytea` Yjs state 원본 저장·재로드
+- Redis pub/sub update·awareness fan-out + 분산 store lock (다중 노드)
 - 기존 페이지 버전을 Yjs full-state로 정확히 한 번만 넣는 원자적 bootstrap API
 - 인증 ticket identity로 awareness 사용자·색상을 강제하고 clientId 탈취·손상 cursor를 차단
 - raw ticket·문서 본문을 남기지 않는 stdout JSON 로그
@@ -16,8 +17,9 @@ Spring REST 트래픽과 분리하고, wiki-backend가 EDIT 권한 확인 후 �
 
 page revision과 shared draft base/generation 전환은 wiki-backend의 단일 PostgreSQL transaction으로
 연결했고, 프론트 본문·제목은 같은 Y.Doc을 사용합니다. 실제 nginx 경로에서 단절 중 동시
-제목·서식·표 편집 수렴과 프로세스 재기동 후 PostgreSQL 복구를 검증했습니다. Redis 다중 노드
-fan-out, 메트릭과 2인 브라우저 caret UX가 남아 있어 production 기능 플래그는 아직 켜지 않습니다.
+제목·서식·표 편집 수렴과 프로세스 재기동 후 PostgreSQL 복구를 검증했습니다. 서로 다른 두 노드에
+클라이언트를 고정한 Redis fan-out·분산 저장 lock·양 노드 재기동 복구도 실측했습니다. 메트릭과 2인
+브라우저 caret UX가 남아 있어 production 기능 플래그는 아직 켜지 않습니다.
 
 ## 인증 흐름
 
@@ -66,6 +68,7 @@ WebSocket은 같은 Hocuspocus listener를 공유합니다.
 | `HOST` | `0.0.0.0` | bind 주소 |
 | `PORT` | `19150` | dev WebSocket/HTTP 포트(운영 `9150` + 10000) |
 | `REDIS_URL` | `redis://localhost:6379/1` | wiki-backend dev와 공유하는 ticket Redis DB 1 |
+| `COLLABORATION_INSTANCE_ID` | `HOSTNAME` 또는 `collaboration-{pid}` | Redis fan-out 노드 고유 식별자 |
 | `DATABASE_URL` | `postgresql://keycloak:keycloak@localhost:5433/wikidb` | Yjs binary 정본 PostgreSQL |
 | `MAX_DOCUMENT_BYTES` | `10485760` | room별 Yjs state 최대 크기 |
 | `SHUTDOWN_TIMEOUT_MS` | `10000` | graceful shutdown 제한 |

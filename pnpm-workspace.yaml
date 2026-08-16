@@ -1,2 +1,4 @@
 allowBuilds:
   esbuild: true
+patchedDependencies:
+  '@hocuspocus/extension-redis@4.6.0': patches/@hocuspocus__extension-redis@4.6.0.patch

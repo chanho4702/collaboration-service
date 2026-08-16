@@ -24,3 +24,13 @@ export const logger: Logger = {
   warn: (event, fields) => write("warn", event, fields),
   error: (event, fields) => write("error", event, fields),
 };
+
+/** third-party extension의 console.error도 JSON 계약과 본문 비노출 경계 안으로 수렴시킨다. */
+export function installStructuredConsoleError(log: Logger = logger): void {
+  console.error = (...values: unknown[]) => {
+    const error = values.find((value): value is Error => value instanceof Error);
+    log.error("collaboration_dependency_error", {
+      reason: error?.name ?? "DEPENDENCY_ERROR",
+    });
+  };
+}

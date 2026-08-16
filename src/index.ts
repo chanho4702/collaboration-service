@@ -1,15 +1,18 @@
 import { Server } from "@hocuspocus/server";
 import { Database } from "@hocuspocus/extension-database";
+import { Redis as RedisFanout } from "@hocuspocus/extension-redis";
 import { Redis } from "ioredis";
 import { Pool } from "pg";
 import { createAuthenticator } from "./authentication.js";
 import { loadConfig } from "./config.js";
 import { CollaborationDocumentStore } from "./documentStore.js";
-import { logger } from "./logger.js";
+import { installStructuredConsoleError, logger } from "./logger.js";
 import { createBootstrapHttpHandler } from "./bootstrapHttp.js";
 import { applyAuthoritativeAwareness } from "./awarenessPolicy.js";
 import type { CollaborationContext } from "./authentication.js";
+import { redisFanoutConfiguration } from "./fanout.js";
 
+installStructuredConsoleError();
 const config = loadConfig();
 const redis = new Redis(config.redisUrl, {
   enableOfflineQueue: false,
@@ -45,11 +48,12 @@ try {
 const server = new Server<CollaborationContext>({
   address: config.host,
   port: config.port,
-  name: `collaboration-${process.pid}`,
+  name: config.instanceId,
   quiet: true,
   // Hocuspocus 내장 signal handler와 경합하지 않고 아래 flush→DB/Redis close 순서를 단일 소유한다.
   stopOnSignals: false,
   extensions: [
+    new RedisFanout(redisFanoutConfiguration(config.redisUrl, config.instanceId)),
     new Database({
       fetch: async ({ documentName }) => {
         const state = await documents.fetch(documentName);
@@ -104,7 +108,12 @@ const server = new Server<CollaborationContext>({
     }
   },
   async onListen({ port }) {
-    logger.info("collaboration_listening", { host: config.host, port });
+    logger.info("collaboration_listening", {
+      host: config.host,
+      port,
+      instanceId: config.instanceId,
+      redisFanout: true,
+    });
   },
 });
 
