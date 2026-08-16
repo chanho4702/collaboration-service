@@ -12,14 +12,15 @@ Spring REST 트래픽과 분리하고, wiki-backend가 EDIT 권한 확인 후 �
 - Redis pub/sub update·awareness fan-out + 분산 store lock (다중 노드)
 - 기존 페이지 버전을 Yjs full-state로 정확히 한 번만 넣는 원자적 bootstrap API
 - 인증 ticket identity로 awareness 사용자·색상을 강제하고 clientId 탈취·손상 cursor를 차단
-- raw ticket·문서 본문을 남기지 않는 stdout JSON 로그
+- raw ticket·문서 본문을 남기지 않는 stdout JSON 로그와 협업 세션·저장 운영 지표
 - SIGTERM/SIGINT graceful shutdown
 
 page revision과 shared draft base/generation 전환은 wiki-backend의 단일 PostgreSQL transaction으로
 연결했고, 프론트 본문·제목은 같은 Y.Doc을 사용합니다. 실제 nginx 경로에서 단절 중 동시
 제목·서식·표 편집 수렴과 프로세스 재기동 후 PostgreSQL 복구를 검증했습니다. 서로 다른 두 노드에
-클라이언트를 고정한 Redis fan-out·분산 저장 lock·양 노드 재기동 복구도 실측했습니다. 메트릭과 2인
-브라우저 caret UX가 남아 있어 production 기능 플래그는 아직 켜지 않습니다.
+클라이언트를 고정한 Redis fan-out·분산 저장 lock·양 노드 재기동 복구도 실측했습니다. stdout
+이벤트 기반 운영 대시보드는 준비됐고, 2인 브라우저 caret UX 실측이 남아 있어 production 기능
+플래그는 아직 켜지 않습니다.
 
 ## 인증 흐름
 
@@ -83,3 +84,18 @@ WebSocket은 같은 Hocuspocus listener를 공유합니다.
   다른 편집자에게 중계하지 않습니다.
 - 클라이언트 오류에는 실패 이유를 구분해 주지 않습니다.
 - 로그와 인증 context에는 raw ticket을 넣지 않습니다.
+
+## 운영 지표
+
+별도 메트릭 저장소를 추가하지 않고 확정된 `stdout JSON → Alloy → Loki` 경로를 사용합니다.
+Grafana는 아래 이벤트를 LogQL로 집계하며 `instanceId`, `pageId`는 Loki stream label이 아니라
+쿼리 시점에만 파싱합니다.
+
+| 이벤트 | 용도 |
+|---|---|
+| `collaboration_session_connected` / `collaboration_session_disconnected` | 노드별 활성 세션·체류 시간·room 접속자 수 |
+| `collaboration_document_stored` | Yjs state 크기·PostgreSQL 저장 지연 |
+| `collaboration_document_store_failed` | 저장 실패 건수와 오류 종류 |
+| `collaboration_authentication_rejected` | 잘못되거나 만료된 ticket 거부 건수 |
+
+문서 본문, raw ticket, 예외 메시지, 사용자 이름은 운영 이벤트에 기록하지 않습니다.

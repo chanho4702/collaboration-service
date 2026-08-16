@@ -11,6 +11,7 @@ import { createBootstrapHttpHandler } from "./bootstrapHttp.js";
 import { applyAuthoritativeAwareness } from "./awarenessPolicy.js";
 import type { CollaborationContext } from "./authentication.js";
 import { redisFanoutConfiguration } from "./fanout.js";
+import { CollaborationTelemetry } from "./telemetry.js";
 
 installStructuredConsoleError();
 const config = loadConfig();
@@ -32,6 +33,7 @@ const bootstrapHttp = createBootstrapHttpHandler({
   maxDocumentBytes: config.maxDocumentBytes,
   log: logger,
 });
+const telemetry = new CollaborationTelemetry(config.instanceId, logger);
 
 try {
   await redis.connect();
@@ -64,7 +66,16 @@ const server = new Server<CollaborationContext>({
         if (!state) throw null;
         return state;
       },
-      store: ({ documentName, state }) => documents.store(documentName, state),
+      store: async ({ documentName, state }) => {
+        const startedAt = performance.now();
+        try {
+          await documents.store(documentName, state);
+          telemetry.documentStored(documentName, state.byteLength, performance.now() - startedAt);
+        } catch (error) {
+          telemetry.documentStoreFailed(documentName, error);
+          throw error;
+        }
+      },
     }),
   ],
   async onAuthenticate(data) {
@@ -100,6 +111,12 @@ const server = new Server<CollaborationContext>({
         reason: "공동 편집 참여자 정보를 확인할 수 없습니다",
       });
     }
+  },
+  async connected({ context, socketId }) {
+    telemetry.connected({ context, socketId });
+  },
+  async onDisconnect({ context, socketId, clientsCount }) {
+    telemetry.disconnected({ context, socketId }, clientsCount);
   },
   async onRequest({ request, response }) {
     if (await bootstrapHttp(request, response)) {
