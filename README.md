@@ -8,11 +8,12 @@ Spring REST 트래픽과 분리하고, wiki-backend가 EDIT 권한 확인 후 �
 - Hocuspocus 4 / Yjs 13 호환 WebSocket 서버
 - Redis `GETDEL` 기반 opaque ticket 1회 소비
 - v1 payload schema·EDIT 권한·`page:<id>` room·만료 재검증
+- PostgreSQL `bytea` Yjs state 원본 저장·재로드
 - raw ticket·문서 본문을 남기지 않는 stdout JSON 로그
 - SIGTERM/SIGINT graceful shutdown
 
-PostgreSQL binary snapshot/update 영속화, Redis 다중 노드 fan-out, presence, 메트릭과 실제 프론트
-provider 연결은 다음 증분입니다. 그 전까지 production 기능 플래그를 켜지 않습니다.
+Redis 다중 노드 fan-out, presence, 메트릭과 실제 프론트 provider 연결은 다음 증분입니다. 그 전까지
+production 기능 플래그를 켜지 않습니다.
 
 ## 인증 흐름
 
@@ -41,8 +42,10 @@ pnpm start
 | 변수 | 기본값 | 설명 |
 |---|---:|---|
 | `HOST` | `0.0.0.0` | bind 주소 |
-| `PORT` | `1234` | WebSocket/HTTP 포트 |
-| `REDIS_URL` | `redis://localhost:14091` | wiki-backend와 공유하는 ticket Redis |
+| `PORT` | `19150` | dev WebSocket/HTTP 포트(운영 `9150` + 10000) |
+| `REDIS_URL` | `redis://localhost:6379/1` | wiki-backend dev와 공유하는 ticket Redis DB 1 |
+| `DATABASE_URL` | `postgresql://keycloak:keycloak@localhost:5433/wikidb` | Yjs binary 정본 PostgreSQL |
+| `MAX_DOCUMENT_BYTES` | `10485760` | room별 Yjs state 최대 크기 |
 | `SHUTDOWN_TIMEOUT_MS` | `10000` | graceful shutdown 제한 |
 
 ## 보안 계약

@@ -2,6 +2,8 @@ export interface ServiceConfig {
   host: string;
   port: number;
   redisUrl: string;
+  databaseUrl: string;
+  maxDocumentBytes: number;
   shutdownTimeoutMs: number;
 }
 
@@ -14,7 +16,7 @@ function integer(name: string, value: string | undefined, fallback: number, maxi
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
-  const redisUrl = env.REDIS_URL?.trim() || "redis://localhost:14091";
+  const redisUrl = env.REDIS_URL?.trim() || "redis://localhost:6379/1";
   let parsedRedisUrl: URL;
   try {
     parsedRedisUrl = new URL(redisUrl);
@@ -24,11 +26,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
   if (!new Set(["redis:", "rediss:"]).has(parsedRedisUrl.protocol)) {
     throw new Error("REDIS_URL은 redis:// 또는 rediss:// 스킴이어야 합니다");
   }
+  const databaseUrl = env.DATABASE_URL?.trim()
+    || "postgresql://keycloak:keycloak@localhost:5433/wikidb";
+  let parsedDatabaseUrl: URL;
+  try {
+    parsedDatabaseUrl = new URL(databaseUrl);
+  } catch {
+    throw new Error("DATABASE_URL 형식이 올바르지 않습니다");
+  }
+  if (!new Set(["postgres:", "postgresql:"]).has(parsedDatabaseUrl.protocol)) {
+    throw new Error("DATABASE_URL은 postgresql:// 스킴이어야 합니다");
+  }
 
   return {
     host: env.HOST?.trim() || "0.0.0.0",
-    port: integer("PORT", env.PORT, 1234, 65_535),
+    port: integer("PORT", env.PORT, 19_150, 65_535),
     redisUrl,
+    databaseUrl,
+    maxDocumentBytes: integer("MAX_DOCUMENT_BYTES", env.MAX_DOCUMENT_BYTES, 10 * 1024 * 1024),
     shutdownTimeoutMs: integer("SHUTDOWN_TIMEOUT_MS", env.SHUTDOWN_TIMEOUT_MS, 10_000),
   };
 }
