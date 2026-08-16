@@ -10,11 +10,13 @@ Spring REST 트래픽과 분리하고, wiki-backend가 EDIT 권한 확인 후 �
 - v1 payload schema·EDIT 권한·`page:<id>` room·만료 재검증
 - PostgreSQL `bytea` Yjs state 원본 저장·재로드
 - 기존 페이지 버전을 Yjs full-state로 정확히 한 번만 넣는 원자적 bootstrap API
+- 인증 ticket identity로 awareness 사용자·색상을 강제하고 clientId 탈취·손상 cursor를 차단
 - raw ticket·문서 본문을 남기지 않는 stdout JSON 로그
 - SIGTERM/SIGINT graceful shutdown
 
 Redis 다중 노드 fan-out, 메트릭, shared draft publish/generation 전환은 다음 증분입니다. 실제 편집기
-Y.Doc 결합 전까지 production 기능 플래그를 켜지 않습니다.
+Y.Doc 결합과 공동 커서는 완료했지만 제목 CRDT와 publish/generation 전환 전까지 production 기능
+플래그를 켜지 않습니다.
 
 ## 인증 흐름
 
@@ -24,7 +26,8 @@ wiki-front ──JWT REST──▶ wiki-backend ──SET TTL──▶ Redis
     ├──binary bootstrap───────┴──▶ collaboration-service ──GETDEL──▶ Redis
     │                                 └─ INSERT ... ON CONFLICT DO NOTHING
     └──Hocuspocus token──────────▶ collaboration-service ──GETDEL──▶ Redis
-                                      └─ payload.room == documentName
+                                      ├─ payload.room == documentName
+                                      └─ awareness.user를 ticket identity로 재작성
 ```
 
 Access Token은 WebSocket에 전달하지 않습니다. raw ticket은 Hocuspocus 인증 메시지에만 실리고,
@@ -71,5 +74,8 @@ WebSocket은 같은 Hocuspocus listener를 공유합니다.
 - ticket은 32-byte Base64URL(43자)만 허용합니다.
 - Redis payload는 schema v1의 정확한 8개 필드만 허용합니다.
 - 잘못된 schema, permission, room, 만료, Redis 장애는 모두 fail-closed합니다.
+- 한 connection은 하나의 awareness clientId만 소유하며 다른 connection의 cursor를 갱신할 수 없습니다.
+- 참여자 이름·ID·색상은 클라이언트 입력을 버리고 인증 context에서 다시 만들며 임의 awareness 필드도
+  다른 편집자에게 중계하지 않습니다.
 - 클라이언트 오류에는 실패 이유를 구분해 주지 않습니다.
 - 로그와 인증 context에는 raw ticket을 넣지 않습니다.

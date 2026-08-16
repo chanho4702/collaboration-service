@@ -7,6 +7,8 @@ import { loadConfig } from "./config.js";
 import { CollaborationDocumentStore } from "./documentStore.js";
 import { logger } from "./logger.js";
 import { createBootstrapHttpHandler } from "./bootstrapHttp.js";
+import { applyAuthoritativeAwareness } from "./awarenessPolicy.js";
+import type { CollaborationContext } from "./authentication.js";
 
 const config = loadConfig();
 const redis = new Redis(config.redisUrl, {
@@ -40,7 +42,7 @@ try {
   process.exit(1);
 }
 
-const server = new Server({
+const server = new Server<CollaborationContext>({
   address: config.host,
   port: config.port,
   name: `collaboration-${process.pid}`,
@@ -66,6 +68,34 @@ const server = new Server({
       documentName: data.documentName,
       token: data.token,
     });
+  },
+  async beforeHandleAwareness({
+    context,
+    document,
+    documentName,
+    states,
+    connection,
+  }) {
+    const result = applyAuthoritativeAwareness({
+      context,
+      documentName,
+      states,
+      connectionClientIds: connection ? document.getClients(connection) : new Set<number>(),
+      documentClientIds: new Set(document.awareness.getStates().keys()),
+    });
+    if (!result.accepted) {
+      // hook에서 예외를 던지면 Hocuspocus가 비정형 console.error를 남긴다. update를 비우고
+      // 연결을 정상 close해 로그 JSON 계약을 지킨다.
+      states.clear();
+      logger.warn("collaboration_awareness_rejected", {
+        reason: result.reason,
+        pageId: context?.pageId,
+      });
+      connection?.close({
+        code: 4403,
+        reason: "공동 편집 참여자 정보를 확인할 수 없습니다",
+      });
+    }
   },
   async onRequest({ request, response }) {
     if (await bootstrapHttp(request, response)) {
