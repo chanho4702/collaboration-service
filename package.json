@@ -18,7 +18,8 @@
     "@hocuspocus/extension-database": "4.6.0",
     "@hocuspocus/server": "4.6.0",
     "ioredis": "6.0.0",
-    "pg": "8.23.0"
+    "pg": "8.23.0",
+    "yjs": "13.6.32"
   },
   "devDependencies": {
     "@types/node": "24.3.0",

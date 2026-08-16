@@ -9,23 +9,38 @@ Spring REST 트래픽과 분리하고, wiki-backend가 EDIT 권한 확인 후 �
 - Redis `GETDEL` 기반 opaque ticket 1회 소비
 - v1 payload schema·EDIT 권한·`page:<id>` room·만료 재검증
 - PostgreSQL `bytea` Yjs state 원본 저장·재로드
+- 기존 페이지 버전을 Yjs full-state로 정확히 한 번만 넣는 원자적 bootstrap API
 - raw ticket·문서 본문을 남기지 않는 stdout JSON 로그
 - SIGTERM/SIGINT graceful shutdown
 
-Redis 다중 노드 fan-out, presence, 메트릭과 실제 프론트 provider 연결은 다음 증분입니다. 그 전까지
-production 기능 플래그를 켜지 않습니다.
+Redis 다중 노드 fan-out, 메트릭, shared draft publish/generation 전환은 다음 증분입니다. 실제 편집기
+Y.Doc 결합 전까지 production 기능 플래그를 켜지 않습니다.
 
 ## 인증 흐름
 
 ```text
 wiki-front ──JWT REST──▶ wiki-backend ──SET TTL──▶ Redis
     │                         │
-    └──Hocuspocus token───────┴──▶ collaboration-service ──GETDEL──▶ Redis
+    ├──binary bootstrap───────┴──▶ collaboration-service ──GETDEL──▶ Redis
+    │                                 └─ INSERT ... ON CONFLICT DO NOTHING
+    └──Hocuspocus token──────────▶ collaboration-service ──GETDEL──▶ Redis
                                       └─ payload.room == documentName
 ```
 
 Access Token은 WebSocket에 전달하지 않습니다. raw ticket은 Hocuspocus 인증 메시지에만 실리고,
 서버는 SHA-256 key로 바꿔 `wiki:collaboration:ticket:v1:*`를 원자적으로 소비합니다.
+
+## 최초 문서 bootstrap
+
+`POST /api/wiki/collaboration/pages/{pageId}/bootstrap`은 다음 경계를 사용합니다.
+
+- `Authorization: Collaboration <43자 1회용 ticket>` — query string에 인증정보를 넣지 않습니다.
+- `Content-Type: application/octet-stream`, `X-Wiki-Page-Version: <양의 정수>`
+- body는 Yjs full-state update이며 `MAX_DOCUMENT_BYTES`를 넘기지 못합니다.
+- 손상된 update는 실제 임시 Y.Doc 적용으로 검증한 뒤 422로 거부합니다.
+- 첫 요청만 `201 { created: true, basePageVersion, generation }`, 이미 있는 공동 초안은 덮지 않고
+  `200 { created: false, ... }`를 반환합니다.
+- bootstrap row가 없는 room은 WebSocket load도 거부해 두 최초 접속자의 중복 seed를 원천 차단합니다.
 
 ## 실행
 

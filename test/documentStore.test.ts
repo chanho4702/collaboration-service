@@ -18,6 +18,8 @@ describe("CollaborationDocumentStore", () => {
 
     expect(database.query).toHaveBeenCalledWith(expect.stringContaining("CREATE TABLE IF NOT EXISTS"));
     expect(database.query).toHaveBeenCalledWith(expect.stringContaining("state bytea NOT NULL"));
+    expect(database.query).toHaveBeenCalledWith(expect.stringContaining("base_page_version bigint"));
+    expect(database.query).toHaveBeenCalledWith(expect.stringContaining("ADD COLUMN IF NOT EXISTS generation"));
   });
 
   it("Yjs binary를 변환 없이 parameterized upsert한다", async () => {
@@ -73,5 +75,52 @@ describe("CollaborationDocumentStore", () => {
     const database = pool();
     await new CollaborationDocumentStore(database as unknown as Pool, 1024).close();
     expect(database.end).toHaveBeenCalledOnce();
+  });
+
+  it("빈 room은 base page version과 generation을 포함해 원자적으로 bootstrap한다", async () => {
+    const database = pool();
+    database.query.mockResolvedValueOnce({
+      rows: [{ base_page_version: "4", generation: "1" }],
+    });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+    const state = Uint8Array.from([1, 2, 3]);
+
+    await expect(store.bootstrap("page:7", state, 4)).resolves.toEqual({
+      created: true,
+      basePageVersion: 4,
+      generation: 1,
+    });
+    expect(database.query).toHaveBeenCalledWith(
+      expect.stringContaining("ON CONFLICT (room) DO NOTHING"),
+      ["page:7", Buffer.from(state), 4],
+    );
+  });
+
+  it("이미 초기화된 room은 기존 state를 덮지 않고 metadata만 반환한다", async () => {
+    const database = pool();
+    database.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ base_page_version: 2, generation: 3 }] });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+    await expect(store.bootstrap("page:7", Uint8Array.from([9]), 8)).resolves.toEqual({
+      created: false,
+      basePageVersion: 2,
+      generation: 3,
+    });
+    expect(database.query).toHaveBeenLastCalledWith(
+      "SELECT base_page_version, generation FROM collaboration_document WHERE room = $1",
+      ["page:7"],
+    );
+  });
+
+  it("bootstrap도 room·문서 크기·기준 버전을 DB 전에 검증한다", async () => {
+    const database = pool();
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 2);
+
+    await expect(store.bootstrap("bad", Uint8Array.from([1]), 1)).rejects.toThrow("room 형식");
+    await expect(store.bootstrap("page:7", Uint8Array.from([1, 2, 3]), 1)).rejects.toThrow("문서 크기");
+    await expect(store.bootstrap("page:7", Uint8Array.from([1]), 0)).rejects.toThrow("양의 정수");
+    expect(database.query).not.toHaveBeenCalled();
   });
 });

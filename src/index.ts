@@ -6,6 +6,7 @@ import { createAuthenticator } from "./authentication.js";
 import { loadConfig } from "./config.js";
 import { CollaborationDocumentStore } from "./documentStore.js";
 import { logger } from "./logger.js";
+import { createBootstrapHttpHandler } from "./bootstrapHttp.js";
 
 const config = loadConfig();
 const redis = new Redis(config.redisUrl, {
@@ -20,6 +21,12 @@ const documents = new CollaborationDocumentStore(new Pool({
   idleTimeoutMillis: 30_000,
   max: 10,
 }), config.maxDocumentBytes);
+const bootstrapHttp = createBootstrapHttpHandler({
+  tickets: redis,
+  documents,
+  maxDocumentBytes: config.maxDocumentBytes,
+  log: logger,
+});
 
 try {
   await redis.connect();
@@ -42,7 +49,15 @@ const server = new Server({
   stopOnSignals: false,
   extensions: [
     new Database({
-      fetch: ({ documentName }) => documents.fetch(documentName),
+      fetch: async ({ documentName }) => {
+        const state = await documents.fetch(documentName);
+        // bootstrap 전 빈 Y.Doc 연결을 허용하면 두 최초 클라이언트가 기존 Markdown을 중복 삽입할 수
+        // 있다. DB row가 원자적으로 만들어진 뒤에만 WebSocket document를 연다.
+        // null rejection은 Hocuspocus가 내부 오류 문구를 비정형 console.error로 쓰지 않으면서
+        // load hook chain과 연결만 안전하게 중단하는 공식 제어 경계다.
+        if (!state) throw null;
+        return state;
+      },
       store: ({ documentName, state }) => documents.store(documentName, state),
     }),
   ],
@@ -51,6 +66,12 @@ const server = new Server({
       documentName: data.documentName,
       token: data.token,
     });
+  },
+  async onRequest({ request, response }) {
+    if (await bootstrapHttp(request, response)) {
+      // Hocuspocus의 기본 Welcome 응답이 뒤이어 쓰이지 않게 null rejection으로 hook chain을 멈춘다.
+      throw null;
+    }
   },
   async onListen({ port }) {
     logger.info("collaboration_listening", { host: config.host, port });
