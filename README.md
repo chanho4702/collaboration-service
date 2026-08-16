@@ -14,9 +14,9 @@ Spring REST 트래픽과 분리하고, wiki-backend가 EDIT 권한 확인 후 �
 - raw ticket·문서 본문을 남기지 않는 stdout JSON 로그
 - SIGTERM/SIGINT graceful shutdown
 
-Redis 다중 노드 fan-out, 메트릭, shared draft publish/generation 전환은 다음 증분입니다. 실제 편집기
-Y.Doc 결합과 공동 커서는 완료했지만 제목 CRDT와 publish/generation 전환 전까지 production 기능
-플래그를 켜지 않습니다.
+page revision과 shared draft base/generation 전환은 wiki-backend의 단일 PostgreSQL transaction으로
+연결했습니다. Redis 다중 노드 fan-out, 메트릭, 제목 CRDT와 장애 복구 검증이 다음 증분이며, 이 작업이
+끝나기 전까지 production 기능 플래그를 켜지 않습니다.
 
 ## 인증 흐름
 
