@@ -25,7 +25,10 @@ function integer(name: string, value: string | undefined, fallback: number, maxi
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
-  const redisUrl = env.REDIS_URL?.trim() || "redis://localhost:6379/1";
+  // 로컬 기본값은 도커 Redis의 호스트 게시 포트 16379다(compose REDIS_HOST_PORT, dev 오프셋 규칙).
+  // 127.0.0.1:6379는 이 호스트의 Windows Redis 3.2가 답해(GETDEL 없음) 무환경 실행이 조용히 그리로 붙었다(2026-09-13).
+  // 컨테이너 안에서는 compose가 REDIS_URL=redis://redis:6379/0을 넣으므로 이 기본값은 쓰이지 않는다.
+  const redisUrl = env.REDIS_URL?.trim() || "redis://localhost:16379/1";
   let parsedRedisUrl: URL;
   try {
     parsedRedisUrl = new URL(redisUrl);
