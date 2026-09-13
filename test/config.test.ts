@@ -7,11 +7,19 @@ describe("service config", () => {
       host: "0.0.0.0",
       port: 19_150,
       instanceId: expect.stringMatching(/^collaboration-[0-9]+$/),
-      redisUrl: "redis://localhost:6379/1",
+      redisUrl: "redis://localhost:16379/1",
       databaseUrl: "postgresql://keycloak:keycloak@localhost:5433/wikidb",
       maxDocumentBytes: 10 * 1024 * 1024,
       shutdownTimeoutMs: 10_000,
     });
+  });
+
+  it("Redis 기본값은 도커 게시 포트 16379다 — 6379는 호스트 Windows Redis 3.2가 답한다(2026-09-13)", () => {
+    const url = new URL(loadConfig({}).redisUrl);
+    expect(url.port).toBe("16379");
+    expect(url.pathname).toBe("/1");
+    expect(loadConfig({ REDIS_URL: "" }).redisUrl).toBe("redis://localhost:16379/1");
+    expect(loadConfig({ REDIS_URL: "redis://redis:6379/0" }).redisUrl).toBe("redis://redis:6379/0");
   });
 
   it("잘못된 Redis 스킴과 포트를 부팅 전에 거부한다", () => {

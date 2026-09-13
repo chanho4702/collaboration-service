@@ -68,7 +68,7 @@ WebSocket은 같은 Hocuspocus listener를 공유합니다.
 |---|---:|---|
 | `HOST` | `0.0.0.0` | bind 주소 |
 | `PORT` | `19150` | dev WebSocket/HTTP 포트(운영 `9150` + 10000) |
-| `REDIS_URL` | `redis://localhost:6379/1` | wiki-backend dev와 공유하는 ticket Redis DB 1 |
+| `REDIS_URL` | `redis://localhost:16379/1` | wiki-backend dev와 공유하는 ticket Redis DB 1. 도커 Redis의 호스트 게시 포트가 16379다(`127.0.0.1:6379`는 호스트의 Windows Redis 3.2 — 쓰지 않는다) |
 | `COLLABORATION_INSTANCE_ID` | `HOSTNAME` 또는 `collaboration-{pid}` | Redis fan-out 노드 고유 식별자 |
 | `DATABASE_URL` | `postgresql://keycloak:keycloak@localhost:5433/wikidb` | Yjs binary 정본 PostgreSQL |
 | `MAX_DOCUMENT_BYTES` | `10485760` | room별 Yjs state 최대 크기 |
