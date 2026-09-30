@@ -9,6 +9,10 @@ export interface CollaborationContext {
   pageId: number;
   room: string;
   permission: "EDIT";
+  /** ticket v2의 발급 시점 page.version. v1 ticket이면 없다. */
+  pageVersion?: number;
+  /** ticket v2의 발급 시점 초안 reset_epoch(행이 없으면 0). v1 ticket이면 없다. */
+  draftEpoch?: number;
 }
 
 interface AuthenticationInput {
@@ -22,6 +26,9 @@ function toContext(payload: TicketPayload): CollaborationContext {
     pageId: payload.pageId,
     room: payload.room,
     permission: payload.permission,
+    ...(payload.schemaVersion === 2
+      ? { pageVersion: payload.pageVersion, draftEpoch: payload.draftEpoch }
+      : {}),
   };
 }
 

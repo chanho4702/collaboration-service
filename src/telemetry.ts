@@ -46,6 +46,20 @@ export class CollaborationTelemetry {
     });
   }
 
+  /** 다른 경로 저장으로 공동 초안이 새로 시작돼 in-memory 문서를 저장 없이 내렸다. */
+  documentReset(
+    documentName: string,
+    reason: "stale_store" | "signal" | "stale_admit",
+    closedConnections: number,
+  ): void {
+    this.log.info("collaboration_document_reset", {
+      instanceId: this.instanceId,
+      pageId: Number(documentName.slice("page:".length)),
+      reason,
+      closedConnections,
+    });
+  }
+
   documentStoreFailed(documentName: string, error: unknown): void {
     this.log.error("collaboration_document_store_failed", {
       instanceId: this.instanceId,

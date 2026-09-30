@@ -5,13 +5,15 @@ import {
   consumeTicket,
   ticketKey,
   type TicketPayload,
+  type TicketPayloadV1,
+  type TicketPayloadV2,
   type TicketStore,
 } from "../src/ticket.js";
 
 const TICKET = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
 const NOW = new Date("2026-08-16T12:00:30.000Z");
 
-function payload(patch: Partial<TicketPayload> = {}): TicketPayload {
+function payload(patch: Partial<TicketPayloadV1> = {}): TicketPayloadV1 {
   return {
     schemaVersion: 1,
     pageId: 7,
@@ -23,6 +25,10 @@ function payload(patch: Partial<TicketPayload> = {}): TicketPayload {
     expiresAt: "2026-08-16T12:01:00.000Z",
     ...patch,
   };
+}
+
+function payloadV2(patch: Partial<TicketPayloadV2> = {}): TicketPayloadV2 {
+  return { ...payload(), schemaVersion: 2, pageVersion: 5, draftEpoch: 2, ...patch };
 }
 
 class MemoryTicketStore implements TicketStore {
@@ -81,6 +87,37 @@ describe("collaboration ticket v1", () => {
     });
   });
 
+  it("schema v2는 pageVersion·draftEpoch를 포함한 정확한 10개 필드로 소비한다", async () => {
+    await expect(consumeTicket(stored(payloadV2()), TICKET, "page:7", NOW)).resolves.toEqual(payloadV2());
+  });
+
+  it("초안 행이 없던 발급(draftEpoch 0)도 v2로 받는다", async () => {
+    const value = payloadV2({ draftEpoch: 0 });
+    await expect(consumeTicket(stored(value), TICKET, "page:7", NOW)).resolves.toEqual(value);
+  });
+
+  it.each([
+    ["v2-missing-pageVersion", { ...payload(), schemaVersion: 2, draftEpoch: 0 }],
+    ["v2-missing-draftEpoch", { ...payload(), schemaVersion: 2, pageVersion: 5 }],
+    ["v2-negative-draftEpoch", payloadV2({ draftEpoch: -1 })],
+    ["v2-fraction-draftEpoch", payloadV2({ draftEpoch: 0.5 })],
+    ["v2-string-draftEpoch", { ...payloadV2(), draftEpoch: "2" }],
+    ["v1-with-draftEpoch", { ...payload(), draftEpoch: 0 }],
+    ["v2-zero-pageVersion", payloadV2({ pageVersion: 0 })],
+    ["v2-fraction-pageVersion", payloadV2({ pageVersion: 1.5 })],
+    ["v2-string-pageVersion", { ...payloadV2(), pageVersion: "5" }],
+    ["v2-unknown-field", { ...payloadV2(), unexpected: true }],
+    ["v1-with-pageVersion", { ...payload(), pageVersion: 5 }],
+    ["schema-3", { ...payloadV2(), schemaVersion: 3 }],
+  ])("잘못된 %s payload를 거부한다", async (_case, value) => {
+    const store = new MemoryTicketStore();
+    store.values.set(ticketKey(TICKET), JSON.stringify(value));
+
+    await expect(consumeTicket(store, TICKET, "page:7", NOW)).rejects.toMatchObject({
+      code: "INVALID_PAYLOAD",
+    });
+  });
+
   it("Redis TTL과 별개로 payload 만료를 다시 확인한다", async () => {
     const store = stored(payload({ expiresAt: "2026-08-16T12:00:20.000Z" }));
 
@@ -131,5 +168,24 @@ describe("collaboration ticket v1", () => {
       permission: "EDIT",
     });
     expect(JSON.stringify(context)).not.toContain(TICKET);
+    expect(context).not.toHaveProperty("pageVersion");
+    expect(context).not.toHaveProperty("draftEpoch");
+  });
+
+  it("v2 ticket의 pageVersion·draftEpoch를 인증 context에 넣는다", async () => {
+    const log: Logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const context = await createAuthenticator(stored(payloadV2({ pageVersion: 9, draftEpoch: 3 })), log, () => NOW)({
+      documentName: "page:7",
+      token: TICKET,
+    });
+
+    expect(context).toStrictEqual({
+      user: { id: 42, name: "Alice" },
+      pageId: 7,
+      room: "page:7",
+      permission: "EDIT",
+      pageVersion: 9,
+      draftEpoch: 3,
+    });
   });
 });

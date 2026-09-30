@@ -58,4 +58,16 @@ describe("collaboration telemetry", () => {
     });
     expect(JSON.stringify(vi.mocked(log.error).mock.calls)).not.toContain("secret body");
   });
+
+  it("공동 초안 리셋을 이유·닫은 연결 수와 함께 남긴다", () => {
+    const log = logger();
+    new CollaborationTelemetry("node-a", log).documentReset("page:7", "signal", 2);
+
+    expect(log.info).toHaveBeenCalledWith("collaboration_document_reset", {
+      instanceId: "node-a",
+      pageId: 7,
+      reason: "signal",
+      closedConnections: 2,
+    });
+  });
 });

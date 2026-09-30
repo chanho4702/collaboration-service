@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { CollaborationDocumentStore } from "../src/documentStore.js";
+import { CollaborationDocumentStore, DraftEpochMismatchError } from "../src/documentStore.js";
 
 function pool() {
   return {
@@ -20,33 +20,82 @@ describe("CollaborationDocumentStore", () => {
     expect(database.query).toHaveBeenCalledWith(expect.stringContaining("state bytea NOT NULL"));
     expect(database.query).toHaveBeenCalledWith(expect.stringContaining("base_page_version bigint"));
     expect(database.query).toHaveBeenCalledWith(expect.stringContaining("ADD COLUMN IF NOT EXISTS generation"));
-  });
-
-  it("Yjs binary를 변환 없이 parameterized upsert한다", async () => {
-    const database = pool();
-    database.query.mockResolvedValue({ rows: [] });
-    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
-    const state = Uint8Array.from([0, 255, 17, 23]);
-
-    await store.store("page:7", state);
-
     expect(database.query).toHaveBeenCalledWith(
-      expect.stringContaining("ON CONFLICT (room) DO UPDATE"),
-      ["page:7", Buffer.from(state)],
+      expect.stringContaining("reset_pending boolean NOT NULL DEFAULT false"),
+    );
+    expect(database.query).toHaveBeenCalledWith(
+      expect.stringContaining("ADD COLUMN IF NOT EXISTS reset_pending boolean NOT NULL DEFAULT false"),
+    );
+    expect(database.query).toHaveBeenCalledWith(expect.stringContaining("reset_epoch bigint NOT NULL DEFAULT 0,"));
+    expect(database.query).toHaveBeenCalledWith(
+      expect.stringContaining("ADD COLUMN IF NOT EXISTS reset_epoch bigint NOT NULL DEFAULT 0"),
     );
   });
 
-  it("저장한 Buffer를 backing memory 공유 없이 Uint8Array로 복원한다", async () => {
+  it("Yjs binary를 변환 없이 로드한 리셋 세대(reset_epoch)의 정상 행에만 UPDATE한다", async () => {
+    const database = pool();
+    database.query.mockResolvedValue({ rows: [], rowCount: 1 });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+    const state = Uint8Array.from([0, 255, 17, 23]);
+
+    await expect(store.store("page:7", state, 3)).resolves.toBe(true);
+
+    const [sql, parameters] = database.query.mock.calls[0]!;
+    expect(sql).toContain("UPDATE collaboration_document");
+    expect(sql).toContain("reset_epoch = $3");
+    expect(sql).toContain("NOT reset_pending");
+    // generation은 정상 게시에서도 오르는 게시 세대라 저장 가드에 쓰면 안 된다(C-1).
+    expect(sql).not.toContain("generation");
+    // 행은 bootstrap만 만든다. 저장이 옛 Y.Doc으로 지워진/리셋된 행을 되살리면 안 된다.
+    expect(sql).not.toContain("INSERT");
+    expect(sql).not.toContain("ON CONFLICT");
+    expect(parameters).toEqual(["page:7", Buffer.from(state), 3]);
+  });
+
+  it("reset_epoch가 바뀌었거나 reset_pending이면 0행 갱신을 stale(false)로 알린다", async () => {
+    const database = pool();
+    database.query.mockResolvedValue({ rows: [], rowCount: 0 });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+    await expect(store.store("page:7", Uint8Array.from([1]), 3)).resolves.toBe(false);
+  });
+
+  it("저장한 Buffer를 backing memory 공유 없이 Uint8Array로 복원하고 reset_epoch를 함께 돌려준다", async () => {
     const database = pool();
     const state = Buffer.from([1, 2, 3]);
-    database.query.mockResolvedValue({ rows: [{ state }] });
+    database.query.mockResolvedValue({ rows: [{ state, reset_epoch: "4", reset_pending: false }] });
     const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
 
     const loaded = await store.fetch("page:7");
 
-    expect(loaded).toEqual(Uint8Array.from([1, 2, 3]));
+    expect(loaded).toEqual({ state: Uint8Array.from([1, 2, 3]), resetEpoch: 4 });
     state[0] = 9;
-    expect(loaded?.[0]).toBe(1);
+    expect(loaded?.state[0]).toBe(1);
+  });
+
+  it("reset_pending 행은 새 기준 bootstrap 전까지 없는 행처럼 로드를 거부한다", async () => {
+    const database = pool();
+    database.query.mockResolvedValue({
+      rows: [{ state: Buffer.from([0, 0]), reset_epoch: 5, reset_pending: true }],
+    });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+    await expect(store.fetch("page:7")).resolves.toBeNull();
+  });
+
+  it("연결 수락 대조용 리셋 상태를 읽고 행이 없으면 null이다", async () => {
+    const database = pool();
+    database.query
+      .mockResolvedValueOnce({ rows: [{ reset_epoch: "3", reset_pending: true }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+    await expect(store.resetState("page:7")).resolves.toEqual({ resetEpoch: 3, resetPending: true });
+    await expect(store.resetState("page:8")).resolves.toBeNull();
+    expect(database.query).toHaveBeenCalledWith(
+      "SELECT reset_epoch, reset_pending FROM collaboration_document WHERE room = $1",
+      ["page:7"],
+    );
   });
 
   it("없는 room은 null이고 SQL 인자 바인딩을 유지한다", async () => {
@@ -56,7 +105,7 @@ describe("CollaborationDocumentStore", () => {
 
     await expect(store.fetch("page:9")).resolves.toBeNull();
     expect(database.query).toHaveBeenCalledWith(
-      "SELECT state FROM collaboration_document WHERE room = $1",
+      "SELECT state, reset_epoch, reset_pending FROM collaboration_document WHERE room = $1",
       ["page:9"],
     );
   });
@@ -66,8 +115,10 @@ describe("CollaborationDocumentStore", () => {
     const store = new CollaborationDocumentStore(database as unknown as Pool, 3);
 
     await expect(store.fetch("../../other")).rejects.toThrow("room 형식");
-    await expect(store.store("page:7", new Uint8Array())).rejects.toThrow("문서 크기");
-    await expect(store.store("page:7", Uint8Array.from([1, 2, 3, 4]))).rejects.toThrow("문서 크기");
+    await expect(store.store("page:7", new Uint8Array(), 1)).rejects.toThrow("문서 크기");
+    await expect(store.store("page:7", Uint8Array.from([1, 2, 3, 4]), 1)).rejects.toThrow("문서 크기");
+    await expect(store.store("page:7", Uint8Array.from([1]), -1)).rejects.toThrow("리셋 세대");
+    await expect(store.resetState("bad")).rejects.toThrow("room 형식");
     expect(database.query).not.toHaveBeenCalled();
   });
 
@@ -91,9 +142,46 @@ describe("CollaborationDocumentStore", () => {
       generation: 1,
     });
     expect(database.query).toHaveBeenCalledWith(
-      expect.stringContaining("ON CONFLICT (room) DO NOTHING"),
+      expect.stringContaining("ON CONFLICT (room) DO UPDATE"),
       ["page:7", Buffer.from(state), 4],
     );
+    const [sql] = database.query.mock.calls[0]!;
+    // 덮어쓰기는 reset_pending 행을 같은 기준 버전으로 claim할 때로만 한정된다.
+    expect(sql).toContain("WHERE collaboration_document.reset_pending");
+    expect(sql).toContain("collaboration_document.base_page_version = EXCLUDED.base_page_version");
+    expect(sql).toContain("reset_pending = false");
+    expect(sql).toContain("RETURNING base_page_version, generation");
+    // claim은 게시 세대(generation)도 리셋 세대(reset_epoch)도 바꾸지 않는다.
+    expect(sql).not.toMatch(/SET[\s\S]*generation\s*=/);
+    expect(sql).not.toContain("reset_epoch");
+  });
+
+  it("같은 기준 버전의 reset_pending 행은 새 state로 claim해 재시작(created:true)한다", async () => {
+    const database = pool();
+    // wiki-backend가 리셋 때 올린 generation(5)을 그대로 돌려준다.
+    database.query.mockResolvedValueOnce({ rows: [{ base_page_version: "8", generation: "5" }] });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+    await expect(store.bootstrap("page:7", Uint8Array.from([1]), 8)).resolves.toEqual({
+      created: true,
+      basePageVersion: 8,
+      generation: 5,
+    });
+    expect(database.query).toHaveBeenCalledOnce();
+  });
+
+  it("기준 버전이 다른 reset_pending 행은 claim하지 않고 행의 base/generation을 돌려준다", async () => {
+    const database = pool();
+    database.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ base_page_version: "9", generation: "5" }] });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+    await expect(store.bootstrap("page:7", Uint8Array.from([1]), 8)).resolves.toEqual({
+      created: false,
+      basePageVersion: 9,
+      generation: 5,
+    });
   });
 
   it("이미 초기화된 room은 기존 state를 덮지 않고 metadata만 반환한다", async () => {
@@ -112,6 +200,102 @@ describe("CollaborationDocumentStore", () => {
       "SELECT base_page_version, generation FROM collaboration_document WHERE room = $1",
       ["page:7"],
     );
+  });
+
+  describe("v2 ticket bootstrap — draftEpoch 원자 대조", () => {
+    it("claim 조건에 티켓 draftEpoch와 행 reset_epoch 비교를 같은 문장으로 넣는다", async () => {
+      const database = pool();
+      database.query.mockResolvedValueOnce({ rows: [{ base_page_version: "8", generation: "5" }] });
+      const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+      await expect(store.bootstrap("page:7", Uint8Array.from([1]), 8, 3)).resolves.toEqual({
+        created: true,
+        basePageVersion: 8,
+        generation: 5,
+      });
+      const [sql, parameters] = database.query.mock.calls[0]!;
+      // epoch>0 티켓은 발급 시점에 행이 있었으므로 claim만 한다(행을 새로 만들지 않는다).
+      expect(sql).toContain("UPDATE collaboration_document");
+      expect(sql).not.toContain("INSERT");
+      expect(sql).toContain("AND reset_pending");
+      expect(sql).toContain("AND base_page_version = $3");
+      expect(sql).toContain("AND reset_epoch = $4");
+      expect(sql).toContain("reset_pending = false");
+      expect(sql).toContain("RETURNING base_page_version, generation");
+      // claim은 게시 세대(generation)도 리셋 세대(reset_epoch)도 바꾸지 않는다.
+      const setClause = /SET([\s\S]*?)WHERE/.exec(sql as string)?.[1] ?? "";
+      expect(setClause).not.toMatch(/generation|reset_epoch/);
+      expect(parameters).toEqual(["page:7", Buffer.from([1]), 8, 3]);
+      expect(database.query).toHaveBeenCalledOnce();
+    });
+
+    it("버전을 올리지 않는 리셋 전에 발급된 티켓(draftEpoch=e)은 리셋 뒤(e+1) 행을 claim하지 못하고 거부된다", async () => {
+      const database = pool();
+      database.query
+        // claim 조건(reset_epoch = 3)이 행(4)과 맞지 않아 아무 행도 갱신되지 않는다.
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ base_page_version: "8", generation: "5", reset_epoch: "4" }] });
+      const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+      await expect(store.bootstrap("page:7", Uint8Array.from([1]), 8, 3))
+        .rejects.toBeInstanceOf(DraftEpochMismatchError);
+      expect(database.query).toHaveBeenLastCalledWith(
+        "SELECT base_page_version, generation, reset_epoch FROM collaboration_document WHERE room = $1",
+        ["page:7"],
+      );
+    });
+
+    it("epoch가 맞는 정상 초안은 덮지 않고 created:false를 돌려준다", async () => {
+      const database = pool();
+      database.query
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ base_page_version: "8", generation: "5", reset_epoch: "3" }] });
+      const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+      await expect(store.bootstrap("page:7", Uint8Array.from([1]), 8, 3)).resolves.toEqual({
+        created: false,
+        basePageVersion: 8,
+        generation: 5,
+      });
+    });
+
+    it("행이 없을 때는 draftEpoch 0 티켓만 INSERT한다(새 행 reset_epoch 기본값 0)", async () => {
+      const database = pool();
+      database.query.mockResolvedValueOnce({ rows: [{ base_page_version: "8", generation: "1" }] });
+      const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+      await expect(store.bootstrap("page:7", Uint8Array.from([1]), 8, 0)).resolves.toEqual({
+        created: true,
+        basePageVersion: 8,
+        generation: 1,
+      });
+      const [sql, parameters] = database.query.mock.calls[0]!;
+      // 새 행의 reset_epoch는 컬럼 기본값 0에 맡긴다(티켓 draftEpoch 0과 같다).
+      expect(sql).toContain("INSERT INTO collaboration_document (room, state, base_page_version, generation)");
+      expect(sql).not.toContain("reset_epoch,");
+      // 충돌 시 claim도 같은 문장에서 epoch를 대조한다.
+      expect(sql).toContain("AND collaboration_document.reset_epoch = $4");
+      expect(parameters).toEqual(["page:7", Buffer.from([1]), 8, 0]);
+    });
+
+    it("행이 없는데 draftEpoch가 0이 아니면 INSERT하지 않고 거부한다", async () => {
+      const database = pool();
+      database.query
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] });
+      const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+      await expect(store.bootstrap("page:7", Uint8Array.from([1]), 8, 2))
+        .rejects.toBeInstanceOf(DraftEpochMismatchError);
+    });
+
+    it("draftEpoch도 DB 전에 검증한다", async () => {
+      const database = pool();
+      const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+      await expect(store.bootstrap("page:7", Uint8Array.from([1]), 8, -1)).rejects.toThrow("0 이상의 정수");
+      expect(database.query).not.toHaveBeenCalled();
+    });
   });
 
   it("bootstrap도 room·문서 크기·기준 버전을 DB 전에 검증한다", async () => {

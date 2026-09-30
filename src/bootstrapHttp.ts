@@ -5,6 +5,7 @@ import {
   authenticateBootstrap,
   BootstrapError,
   persistBootstrapDocument,
+  requireTicketPageVersion,
 } from "./bootstrap.js";
 import type { TicketStore } from "./ticket.js";
 
@@ -114,16 +115,23 @@ export function createBootstrapHttpHandler(dependencies: BootstrapHttpDependenci
     }
 
     try {
-      await authenticateBootstrap(
+      const payload = await authenticateBootstrap(
         dependencies.tickets,
         ticket,
         pageId,
         dependencies.now?.() ?? new Date(),
       );
+      // body를 읽기 전에 기준 버전을 대조해 옛 페이지 기준의 대용량 업로드를 받지 않는다.
+      requireTicketPageVersion(payload, basePageVersion);
       const state = await readState(request, dependencies.maxDocumentBytes);
       const result = await persistBootstrapDocument(
         dependencies.documents,
-        { pageId, basePageVersion, state },
+        {
+          pageId,
+          basePageVersion,
+          state,
+          ...(payload.schemaVersion === 2 ? { draftEpoch: payload.draftEpoch } : {}),
+        },
       );
       dependencies.log.info("collaboration_document_bootstrapped", {
         pageId,
@@ -139,6 +147,12 @@ export function createBootstrapHttpHandler(dependencies: BootstrapHttpDependenci
       } else if (error instanceof BootstrapError && error.code === "AUTHENTICATION_FAILED") {
         dependencies.log.warn("collaboration_bootstrap_rejected", { pageId, reason: error.code });
         json(response, 401, { error: error.message });
+      } else if (
+        error instanceof BootstrapError
+        && (error.code === "PAGE_VERSION_MISMATCH" || error.code === "DRAFT_EPOCH_MISMATCH")
+      ) {
+        dependencies.log.warn("collaboration_bootstrap_rejected", { pageId, reason: error.code });
+        json(response, 409, { error: error.message });
       } else if (error instanceof BootstrapError && error.code === "INVALID_DOCUMENT") {
         dependencies.log.warn("collaboration_bootstrap_rejected", { pageId, reason: error.code });
         json(response, 422, { error: error.message });

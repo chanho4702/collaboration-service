@@ -1,6 +1,5 @@
-import { Server } from "@hocuspocus/server";
+import { Server, type Document } from "@hocuspocus/server";
 import { Database } from "@hocuspocus/extension-database";
-import { Redis as RedisFanout } from "@hocuspocus/extension-redis";
 import { Redis } from "ioredis";
 import { Pool } from "pg";
 import { createAuthenticator } from "./authentication.js";
@@ -10,8 +9,9 @@ import { installStructuredConsoleError, logger } from "./logger.js";
 import { createBootstrapHttpHandler } from "./bootstrapHttp.js";
 import { applyAuthoritativeAwareness } from "./awarenessPolicy.js";
 import type { CollaborationContext } from "./authentication.js";
-import { redisFanoutConfiguration } from "./fanout.js";
+import { EpochIsolatedRedisFanout, redisFanoutConfiguration } from "./fanout.js";
 import { CollaborationTelemetry } from "./telemetry.js";
+import { DocumentResetCoordinator, RESET_CHANNEL } from "./documentReset.js";
 
 installStructuredConsoleError();
 const config = loadConfig();
@@ -34,15 +34,41 @@ const bootstrapHttp = createBootstrapHttpHandler({
   log: logger,
 });
 const telemetry = new CollaborationTelemetry(config.instanceId, logger);
+const resets = new DocumentResetCoordinator<Document>({
+  documents,
+  telemetry,
+  log: logger,
+  publish: (message) => redis.publish(RESET_CHANNEL, message),
+  // 리셋된 옛 문서가 언로드 대기(disconnectDelay) 동안 같은 epoch 피어와 주고받지 않게 즉시 끊는다.
+  onReset: (documentName) => fanout.detach(documentName),
+});
+// fan-out 채널을 reset_epoch별로 격리한다. 새 epoch를 로드한 노드는 옛 epoch 사본과 동기화하지 않는다.
+const fanout = new EpochIsolatedRedisFanout(
+  redisFanoutConfiguration(config.redisUrl, config.instanceId),
+  (documentName) => resets.epochOf(documentName),
+);
+// pub/sub 구독 연결은 명령을 보낼 수 없으므로 ticket GETDEL 연결과 분리한다. fan-out extension의
+// 연결과도 별개다. 재연결 시 ioredis가 자동으로 다시 구독한다.
+const resetSubscriber = redis.duplicate();
+resetSubscriber.on("message", (channel: string, message: string) => {
+  if (channel === RESET_CHANNEL) resets.handleSignal(message);
+});
+resetSubscriber.on("error", (error: Error) => {
+  // 신호는 즉시 끊기 위한 최적화다. 정확성은 저장 세대 가드가 보장하므로 경고만 남긴다.
+  logger.warn("collaboration_reset_signal_unavailable", { reason: error.name });
+});
 
 try {
   await redis.connect();
+  await resetSubscriber.connect();
+  await resetSubscriber.subscribe(RESET_CHANNEL);
   await documents.initialize();
 } catch (error) {
   logger.error("collaboration_dependency_startup_failed", {
     reason: error instanceof Error ? error.name : "UNKNOWN",
   });
   redis.disconnect();
+  resetSubscriber.disconnect();
   await documents.close().catch(() => undefined);
   process.exit(1);
 }
@@ -55,34 +81,40 @@ const server = new Server<CollaborationContext>({
   // Hocuspocus 내장 signal handler와 경합하지 않고 아래 flush→DB/Redis close 순서를 단일 소유한다.
   stopOnSignals: false,
   extensions: [
-    new RedisFanout(redisFanoutConfiguration(config.redisUrl, config.instanceId)),
+    fanout,
     new Database({
-      fetch: async ({ documentName }) => {
-        const state = await documents.fetch(documentName);
+      fetch: async ({ documentName, document }) => {
+        const loaded = await documents.fetch(documentName);
         // bootstrap 전 빈 Y.Doc 연결을 허용하면 두 최초 클라이언트가 기존 Markdown을 중복 삽입할 수
-        // 있다. DB row가 원자적으로 만들어진 뒤에만 WebSocket document를 연다.
+        // 있다. DB row가 원자적으로 만들어진 뒤에만 WebSocket document를 연다. reset_pending 행(다른
+        // 경로 저장으로 무효가 된 초안)도 새 기준 bootstrap이 claim하기 전까지 같은 이유로 거부한다.
         // null rejection은 Hocuspocus가 내부 오류 문구를 비정형 console.error로 쓰지 않으면서
         // load hook chain과 연결만 안전하게 중단하는 공식 제어 경계다.
-        if (!state) throw null;
-        return state;
+        if (!loaded) throw null;
+        resets.loaded(documentName, document, loaded.resetEpoch);
+        return loaded.state;
       },
-      store: async ({ documentName, state }) => {
-        const startedAt = performance.now();
-        try {
-          await documents.store(documentName, state);
-          telemetry.documentStored(documentName, state.byteLength, performance.now() - startedAt);
-        } catch (error) {
-          telemetry.documentStoreFailed(documentName, error);
-          throw error;
-        }
-      },
+      // reset_epoch 가드 UPDATE 전용 저장. 0행이면 연결을 4409로 닫고 문서를 저장 없이 내린다.
+      store: ({ documentName, document, state }) => resets.store(documentName, document, state),
     }),
   ],
   async onAuthenticate(data) {
-    return createAuthenticator(redis, logger)({
+    const context = await createAuthenticator(redis, logger)({
       documentName: data.documentName,
       token: data.token,
     });
+    // DB reset_epoch 대조(옛 epoch 문서 리셋·v2 draftEpoch 불일치 거부) 뒤, 리셋된 옛 문서가 아직
+    // 메모리에서 내려가는 중이면 새 연결이 거기 붙지 않게 기다린다.
+    await resets.admit(context.room, context.draftEpoch);
+    return context;
+  },
+  async afterUnloadDocument({ documentName }) {
+    resets.afterUnload(documentName);
+  },
+  // 모든 수신 메시지(인증 전 큐 포함)가 문서에 적용되기 전에 티켓 draftEpoch·받은 리셋 신호와 실제 로드
+  // 문서의 epoch를 대조한다. 어긋나면 4409로 닫고 메시지를 적용하지 않는다.
+  async beforeHandleMessage({ documentName, document, connection, context }) {
+    resets.requireConnection({ documentName, document, connection, draftEpoch: context.draftEpoch });
   },
   async beforeHandleAwareness({
     context,
@@ -112,8 +144,15 @@ const server = new Server<CollaborationContext>({
       });
     }
   },
-  async connected({ context, socketId }) {
+  async connected({ context, socketId, connection, documentName }) {
     telemetry.connected({ context, socketId });
+    // 메시지를 보내지 않는 연결도 로드 중 받은 리셋 신호·epoch 불일치를 바로 통지받게 한다.
+    resets.guardConnection({
+      documentName,
+      document: connection.document,
+      connection,
+      draftEpoch: context.draftEpoch,
+    });
   },
   async onDisconnect({ context, socketId, clientsCount }) {
     telemetry.disconnected({ context, socketId }, clientsCount);
@@ -134,6 +173,8 @@ const server = new Server<CollaborationContext>({
   },
 });
 
+resets.attach(server.hocuspocus);
+
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
@@ -148,7 +189,7 @@ async function shutdown(signal: string): Promise<void> {
 
   try {
     await server.destroy();
-    await Promise.all([redis.quit(), documents.close()]);
+    await Promise.all([redis.quit(), resetSubscriber.quit(), documents.close()]);
     logger.info("collaboration_shutdown_completed");
   } finally {
     clearTimeout(timeout);
@@ -165,6 +206,7 @@ try {
     reason: error instanceof Error ? error.name : "UNKNOWN",
   });
   redis.disconnect();
+  resetSubscriber.disconnect();
   await Promise.allSettled([server.destroy(), documents.close()]);
   process.exitCode = 1;
 }

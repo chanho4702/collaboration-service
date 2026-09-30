@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { createBootstrapHttpHandler } from "../src/bootstrapHttp.js";
+import { DraftEpochMismatchError } from "../src/documentStore.js";
 import type { Logger } from "../src/logger.js";
 import { ticketKey, type TicketPayload, type TicketStore } from "../src/ticket.js";
 
@@ -23,8 +24,8 @@ function payload(): TicketPayload {
   };
 }
 
-function tickets(): TicketStore {
-  const values = new Map([[ticketKey(TICKET), JSON.stringify(payload())]]);
+function tickets(value: TicketPayload = payload()): TicketStore {
+  const values = new Map([[ticketKey(TICKET), JSON.stringify(value)]]);
   return {
     getdel: vi.fn(async (key: string) => {
       const value = values.get(key) ?? null;
@@ -121,6 +122,97 @@ describe("bootstrap HTTP boundary", () => {
     const reused = await request();
     expect(reused.status).toBe(401);
     expect(await reused.json()).toEqual({ error: "공동 편집 인증에 실패했습니다" });
+  });
+
+  it("v2 ticket의 pageVersion과 X-Wiki-Page-Version이 다르면 초안을 건드리지 않고 409를 돌려준다", async () => {
+    const log = logger();
+    const documents = { bootstrap: vi.fn() };
+    const url = await listen(createBootstrapHttpHandler({
+      tickets: tickets({ ...payload(), schemaVersion: 2, pageVersion: 5, draftEpoch: 1 }),
+      documents,
+      maxDocumentBytes: 1024,
+      log,
+      now: () => NOW,
+    }));
+
+    const response = await fetch(`${url}/api/wiki/collaboration/pages/7/bootstrap`, {
+      method: "POST",
+      headers: {
+        Authorization: `Collaboration ${TICKET}`,
+        "Content-Type": "application/octet-stream",
+        "X-Wiki-Page-Version": "4",
+      },
+      body: state() as BodyInit,
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "페이지가 그사이 변경되었습니다. 최신 페이지를 다시 불러와 주세요",
+    });
+    expect(documents.bootstrap).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith("collaboration_bootstrap_rejected", {
+      pageId: 7,
+      reason: "PAGE_VERSION_MISMATCH",
+    });
+  });
+
+  it("v2 ticket의 pageVersion이 같으면 reset_pending claim 결과를 201로 돌려준다", async () => {
+    const documents = {
+      bootstrap: vi.fn().mockResolvedValue({ created: true, basePageVersion: 5, generation: 3 }),
+    };
+    const url = await listen(createBootstrapHttpHandler({
+      tickets: tickets({ ...payload(), schemaVersion: 2, pageVersion: 5, draftEpoch: 1 }),
+      documents,
+      maxDocumentBytes: 1024,
+      log: logger(),
+      now: () => NOW,
+    }));
+
+    const response = await fetch(`${url}/api/wiki/collaboration/pages/7/bootstrap`, {
+      method: "POST",
+      headers: {
+        Authorization: `Collaboration ${TICKET}`,
+        "Content-Type": "application/octet-stream",
+        "X-Wiki-Page-Version": "5",
+      },
+      body: state() as BodyInit,
+    });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ created: true, basePageVersion: 5, generation: 3 });
+    expect(documents.bootstrap).toHaveBeenCalledWith("page:7", expect.any(Uint8Array), 5, 1);
+  });
+
+  it("v2 ticket의 draftEpoch가 행 reset_epoch와 달라 claim이 거부되면 409를 돌려준다", async () => {
+    const log = logger();
+    const documents = { bootstrap: vi.fn().mockRejectedValue(new DraftEpochMismatchError()) };
+    const url = await listen(createBootstrapHttpHandler({
+      tickets: tickets({ ...payload(), schemaVersion: 2, pageVersion: 5, draftEpoch: 3 }),
+      documents,
+      maxDocumentBytes: 1024,
+      log,
+      now: () => NOW,
+    }));
+
+    const response = await fetch(`${url}/api/wiki/collaboration/pages/7/bootstrap`, {
+      method: "POST",
+      headers: {
+        Authorization: `Collaboration ${TICKET}`,
+        "Content-Type": "application/octet-stream",
+        "X-Wiki-Page-Version": "5",
+      },
+      body: state() as BodyInit,
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "공동 초안이 그사이 새로 시작되었습니다. 최신 페이지를 다시 불러와 주세요",
+    });
+    expect(documents.bootstrap).toHaveBeenCalledWith("page:7", expect.any(Uint8Array), 5, 3);
+    expect(log.warn).toHaveBeenCalledWith("collaboration_bootstrap_rejected", {
+      pageId: 7,
+      reason: "DRAFT_EPOCH_MISMATCH",
+    });
   });
 
   it("oversized body는 413이고 비-bootstrap 경로는 기존 health handler에 넘긴다", async () => {
