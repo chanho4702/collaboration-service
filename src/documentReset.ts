@@ -1,4 +1,4 @@
-import type { CollaborationDocumentStore } from "./documentStore.js";
+import { DocumentTooLargeError, type CollaborationDocumentStore } from "./documentStore.js";
 import type { Logger } from "./logger.js";
 import type { CollaborationTelemetry } from "./telemetry.js";
 
@@ -6,6 +6,20 @@ import type { CollaborationTelemetry } from "./telemetry.js";
 export const RESET_CHANNEL = "wiki:collaboration:reset";
 export const RESET_CLOSE_CODE = 4409;
 export const RESET_CLOSE_REASON = "공동 초안이 다른 경로의 저장으로 새로 시작되었습니다";
+/**
+ * 문서가 저장 상한을 넘어 더는 저장할 수 없다(높음-4). 클라이언트는 이 코드에서 재연결하지 않고 로컬 사본을
+ * 남긴다 — 다시 붙으면 같은 큰 상태를 다시 올려 같은 실패를 반복하기 때문이다.
+ */
+export const TOO_LARGE_CLOSE_CODE = 4413;
+export const TOO_LARGE_CLOSE_REASON = "문서가 공동 편집 저장 한도를 넘어 저장되지 않았습니다";
+
+interface CloseEvent {
+  code: number;
+  reason: string;
+}
+
+const RESET_EVENT: CloseEvent = { code: RESET_CLOSE_CODE, reason: RESET_CLOSE_REASON };
+const TOO_LARGE_EVENT: CloseEvent = { code: TOO_LARGE_CLOSE_CODE, reason: TOO_LARGE_CLOSE_REASON };
 
 const ROOM_PATTERN = /^page:[1-9][0-9]*$/;
 const DEFAULT_ADMIT_TIMEOUT_MS = 5_000;
@@ -16,7 +30,7 @@ const DEFAULT_SIGNAL_RETENTION_MS = 60_000;
 // ws readyState: CONNECTING(0)·OPEN(1)일 때만 close frame을 보낼 수 있다.
 const CLOSABLE_SOCKET_STATES = new Set([0, 1]);
 
-export type ResetReason = "stale_store" | "signal" | "stale_admit";
+export type ResetReason = "stale_store" | "signal" | "stale_admit" | "too_large";
 
 export interface ResetSignal {
   room: string;
@@ -46,9 +60,17 @@ export interface ResetHost<D extends ResetDocument> {
   unloadDocument(document: D): Promise<unknown>;
 }
 
-export interface DocumentResetDependencies {
+export interface DocumentResetDependencies<D extends ResetDocument = ResetDocument> {
   documents: Pick<CollaborationDocumentStore, "store" | "resetState">;
-  telemetry: Pick<CollaborationTelemetry, "documentStored" | "documentStoreFailed" | "documentReset">;
+  telemetry: Pick<
+    CollaborationTelemetry,
+    "documentStored" | "documentStoreFailed" | "documentReset" | "documentTooLarge"
+  >;
+  /**
+   * 저장 때 DB 정본에만 있던 내용(다른 노드가 먼저 쓴 편집)을 메모리 문서에 합친다. index.ts가
+   * `Y.applyUpdate`로 넣는다. 없으면 병합 결과를 저장만 하고 메모리에는 넣지 않는다.
+   */
+  absorb?: (document: D, persisted: Uint8Array) => void;
   log: Logger;
   /** 리셋 신호 발행. 없으면 발행하지 않는다. */
   publish?: (message: string) => Promise<unknown>;
@@ -65,6 +87,8 @@ export interface DocumentResetDependencies {
 
 interface ResetState<D> {
   document: D;
+  /** 이 문서에 붙은(붙으려는) 연결을 닫을 때 쓰는 close 이벤트. 리셋이면 4409, 상한 초과면 4413. */
+  event: CloseEvent;
   settled: Promise<void>;
   resolve: () => void;
   timer: NodeJS.Timeout;
@@ -113,7 +137,7 @@ export class DocumentResetCoordinator<D extends ResetDocument = ResetDocument> {
   /** room별로 받은 가장 큰 리셋 신호 epoch와 수신 시각(ms). 로드 중 도착한 신호를 잃지 않기 위함이다. */
   private readonly signals = new Map<string, { resetEpoch: number; receivedAt: number }>();
 
-  constructor(private readonly dependencies: DocumentResetDependencies) {}
+  constructor(private readonly dependencies: DocumentResetDependencies<D>) {}
 
   /** Hocuspocus 인스턴스는 hook 정의 뒤에 만들어지므로 나중에 연결한다. */
   attach(host: ResetHost<D>): void {
@@ -149,8 +173,24 @@ export class DocumentResetCoordinator<D extends ResetDocument = ResetDocument> {
     const startedAt = now();
     let stored: boolean;
     try {
-      stored = await this.dependencies.documents.store(documentName, state, resetEpoch);
+      const absorb = this.dependencies.absorb;
+      stored = absorb
+        ? await this.dependencies.documents.store(
+          documentName,
+          state,
+          resetEpoch,
+          (persisted) => absorb(document as D, persisted),
+        )
+        : await this.dependencies.documents.store(documentName, state, resetEpoch);
     } catch (error) {
+      if (error instanceof DocumentTooLargeError) {
+        // 조용히 미저장으로 두지 않는다: 접속자 전원에게 4413으로 알리고, 이 메모리 문서는 저장 없이 내린다.
+        // 예외를 던지면 Hocuspocus가 문서를 메모리에 붙잡아 두고 새 접속자가 그 큰 문서에 다시 붙는다.
+        // DB에는 상한 안이던 마지막 저장본이 남고, 다음 접속은 그것으로 시작한다.
+        this.dependencies.telemetry.documentTooLarge(documentName, error.byteLength, error.maxBytes);
+        this.reset(documentName, "too_large", document, TOO_LARGE_EVENT);
+        return;
+      }
       this.dependencies.telemetry.documentStoreFailed(documentName, error);
       throw error;
     }
@@ -197,8 +237,9 @@ export class DocumentResetCoordinator<D extends ResetDocument = ResetDocument> {
     const resetEpoch = this.epochs.get(document);
     if (resetEpoch === undefined) return true;
 
-    if (this.resetting.get(documentName)?.document === document) {
-      if (connection) this.closeConnection(connection);
+    const resetting = this.resetting.get(documentName);
+    if (resetting?.document === document) {
+      if (connection) this.closeConnection(connection, resetting.event);
       return false;
     }
     const signal = this.latestSignal(documentName);
@@ -316,7 +357,7 @@ export class DocumentResetCoordinator<D extends ResetDocument = ResetDocument> {
     if (!settled) rejectAdmission(log, "DOCUMENT_RESETTING");
   }
 
-  private reset(documentName: string, reason: ResetReason, expected: object): void {
+  private reset(documentName: string, reason: ResetReason, expected: object, event: CloseEvent = RESET_EVENT): void {
     const host = this.host;
     const document = host?.documents.get(documentName);
     // 옛 문서 객체의 늦은 신호·저장이 같은 이름으로 다시 로드된 새 문서를 내리지 않게 한다.
@@ -339,11 +380,11 @@ export class DocumentResetCoordinator<D extends ResetDocument = ResetDocument> {
       });
     }, this.dependencies.resetEntryTimeoutMs ?? DEFAULT_RESET_ENTRY_TIMEOUT_MS);
     timer.unref?.();
-    this.resetting.set(documentName, { document, settled, resolve, timer });
+    this.resetting.set(documentName, { document, event, settled, resolve, timer });
 
     const connections = document.getConnections();
     this.dependencies.telemetry.documentReset(documentName, reason, connections.length);
-    for (const connection of connections) this.closeConnection(connection);
+    for (const connection of connections) this.closeConnection(connection, event);
     try {
       this.dependencies.onReset?.(documentName);
     } catch {
@@ -377,8 +418,7 @@ export class DocumentResetCoordinator<D extends ResetDocument = ResetDocument> {
     state.resolve();
   }
 
-  private closeConnection(connection: ResetConnection): void {
-    const event = { code: RESET_CLOSE_CODE, reason: RESET_CLOSE_REASON };
+  private closeConnection(connection: ResetConnection, event: CloseEvent = RESET_EVENT): void {
     // 문서 연결을 먼저 떼어 Hocuspocus disconnect 경로를 태운다. 이 문서 단위 close 메시지는 reason만
     // 싣고 provider는 code 1000으로 보므로, 클라이언트가 4409를 구분하도록 WebSocket 자체도 닫는다.
     connection.close(event);

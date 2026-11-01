@@ -1,6 +1,11 @@
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { CollaborationDocumentStore, DraftEpochMismatchError } from "../src/documentStore.js";
+import * as Y from "yjs";
+import {
+  CollaborationDocumentStore,
+  DocumentTooLargeError,
+  DraftEpochMismatchError,
+} from "../src/documentStore.js";
 
 function pool() {
   return {
@@ -34,30 +39,109 @@ describe("CollaborationDocumentStore", () => {
 
   it("Yjs binary를 변환 없이 로드한 리셋 세대(reset_epoch)의 정상 행에만 UPDATE한다", async () => {
     const database = pool();
-    database.query.mockResolvedValue({ rows: [], rowCount: 1 });
+    database.query
+      .mockResolvedValueOnce({ rows: [{ state: Buffer.from([9]), reset_epoch: 3, reset_pending: false, version: 5 }] })
+      .mockResolvedValueOnce({ rows: [{ version: 6 }], rowCount: 1 });
     const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
     const state = Uint8Array.from([0, 255, 17, 23]);
 
+    await store.fetch("page:7");
     await expect(store.store("page:7", state, 3)).resolves.toBe(true);
 
-    const [sql, parameters] = database.query.mock.calls[0]!;
+    const [sql, parameters] = database.query.mock.calls[1]!;
     expect(sql).toContain("UPDATE collaboration_document");
     expect(sql).toContain("reset_epoch = $3");
     expect(sql).toContain("NOT reset_pending");
+    // 로드 뒤 다른 노드가 쓰지 않았을 때만 병합 없이 덮어쓴다(높음-3 단조 저장의 빠른 길).
+    expect(sql).toContain("version = $4");
     // generation은 정상 게시에서도 오르는 게시 세대라 저장 가드에 쓰면 안 된다(C-1).
     expect(sql).not.toContain("generation");
     // 행은 bootstrap만 만든다. 저장이 옛 Y.Doc으로 지워진/리셋된 행을 되살리면 안 된다.
     expect(sql).not.toContain("INSERT");
     expect(sql).not.toContain("ON CONFLICT");
-    expect(parameters).toEqual(["page:7", Buffer.from(state), 3]);
+    expect(parameters).toEqual(["page:7", Buffer.from(state), 3, 5]);
   });
 
   it("reset_epoch가 바뀌었거나 reset_pending이면 0행 갱신을 stale(false)로 알린다", async () => {
+    const database = pool();
+    database.query
+      .mockResolvedValueOnce({ rows: [{ state: Buffer.from([9]), reset_epoch: 3, reset_pending: false, version: 5 }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ state: Buffer.from([9]), reset_epoch: 4, reset_pending: true, version: 6 }] });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
+
+    await store.fetch("page:7");
+    await expect(store.store("page:7", Uint8Array.from([1]), 3)).resolves.toBe(false);
+  });
+
+  it("행이 사라졌으면 stale(false)이고 새로 만들지 않는다", async () => {
     const database = pool();
     database.query.mockResolvedValue({ rows: [], rowCount: 0 });
     const store = new CollaborationDocumentStore(database as unknown as Pool, 1024);
 
     await expect(store.store("page:7", Uint8Array.from([1]), 3)).resolves.toBe(false);
+    for (const [sql] of database.query.mock.calls) expect(sql).not.toContain("INSERT");
+  });
+
+  it("그 사이 다른 노드가 저장했으면 DB 정본과 병합해 단조 저장하고, DB에만 있던 내용을 메모리에 흡수한다", async () => {
+    // 같은 초안에서 갈라진 두 노드 — Redis 순단으로 서로의 편집을 못 받았다.
+    const base = new Y.Doc();
+    base.getText("t").insert(0, "공통");
+    const baseState = Y.encodeStateAsUpdate(base);
+    const ahead = new Y.Doc();
+    Y.applyUpdate(ahead, baseState);
+    ahead.getText("t").insert(2, " 앞선 노드");
+    const behind = new Y.Doc();
+    Y.applyUpdate(behind, baseState);
+    behind.getText("t").insert(0, "뒤처진 노드 ");
+
+    const database = pool();
+    let rowState: Buffer = Buffer.from(Y.encodeStateAsUpdate(ahead));
+    database.query
+      // 로드 시점 version 5
+      .mockResolvedValueOnce({ rows: [{ state: Buffer.from(baseState), reset_epoch: 3, reset_pending: false, version: 5 }] })
+      // 앞선 노드가 version 6으로 썼으므로 버전 가드가 빗나간다
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockImplementationOnce(async () => ({
+        rows: [{ state: rowState, reset_epoch: 3, reset_pending: false, version: 6 }],
+      }))
+      .mockImplementationOnce(async (_sql: string, parameters: unknown[]) => {
+        rowState = parameters[1] as Buffer;
+        return { rows: [{ version: 7 }], rowCount: 1 };
+      });
+    const store = new CollaborationDocumentStore(database as unknown as Pool, 1024 * 1024);
+    await store.fetch("page:7");
+
+    const absorbed: Uint8Array[] = [];
+    await expect(store.store("page:7", Y.encodeStateAsUpdate(behind), 3, (state) => absorbed.push(state)))
+      .resolves.toBe(true);
+
+    const [, retryParameters] = database.query.mock.calls[3]!;
+    expect(retryParameters![3]).toBe(6);
+    const saved = new Y.Doc();
+    Y.applyUpdate(saved, Uint8Array.from(rowState));
+    // 어느 쪽 편집도 지워지지 않는다(전체 상태 덮어쓰기였다면 "앞선 노드"가 사라졌다).
+    expect(saved.getText("t").toString()).toContain("앞선 노드");
+    expect(saved.getText("t").toString()).toContain("뒤처진 노드");
+    expect(absorbed).toHaveLength(1);
+    Y.applyUpdate(behind, absorbed[0]!);
+    expect(behind.getText("t").toString()).toBe(saved.getText("t").toString());
+  });
+
+  it("병합 결과가 상한을 넘으면 DocumentTooLargeError로 알린다", async () => {
+    const left = new Y.Doc();
+    left.getText("t").insert(0, "a".repeat(40));
+    const right = new Y.Doc();
+    right.getText("t").insert(0, "b".repeat(40));
+    const database = pool();
+    database.query.mockResolvedValue({
+      rows: [{ state: Buffer.from(Y.encodeStateAsUpdate(left)), reset_epoch: 1, reset_pending: false, version: 2 }],
+      rowCount: 0,
+    });
+    const rightState = Y.encodeStateAsUpdate(right);
+    const store = new CollaborationDocumentStore(database as unknown as Pool, rightState.byteLength + 10);
+
+    await expect(store.store("page:7", rightState, 1)).rejects.toBeInstanceOf(DocumentTooLargeError);
   });
 
   it("저장한 Buffer를 backing memory 공유 없이 Uint8Array로 복원하고 reset_epoch를 함께 돌려준다", async () => {
@@ -105,7 +189,7 @@ describe("CollaborationDocumentStore", () => {
 
     await expect(store.fetch("page:9")).resolves.toBeNull();
     expect(database.query).toHaveBeenCalledWith(
-      "SELECT state, reset_epoch, reset_pending FROM collaboration_document WHERE room = $1",
+      "SELECT state, reset_epoch, reset_pending, version FROM collaboration_document WHERE room = $1",
       ["page:9"],
     );
   });
@@ -116,7 +200,7 @@ describe("CollaborationDocumentStore", () => {
 
     await expect(store.fetch("../../other")).rejects.toThrow("room 형식");
     await expect(store.store("page:7", new Uint8Array(), 1)).rejects.toThrow("문서 크기");
-    await expect(store.store("page:7", Uint8Array.from([1, 2, 3, 4]), 1)).rejects.toThrow("문서 크기");
+    await expect(store.store("page:7", Uint8Array.from([1, 2, 3, 4]), 1)).rejects.toBeInstanceOf(DocumentTooLargeError);
     await expect(store.store("page:7", Uint8Array.from([1]), -1)).rejects.toThrow("리셋 세대");
     await expect(store.resetState("bad")).rejects.toThrow("room 형식");
     expect(database.query).not.toHaveBeenCalled();

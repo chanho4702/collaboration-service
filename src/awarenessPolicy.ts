@@ -29,6 +29,12 @@ export interface AwarenessPolicyInput {
   documentClientIds: ReadonlySet<number>;
 }
 
+export interface RemoteAwarenessInput {
+  states: Map<number, Record<string, unknown>>;
+  /** 이 노드의 연결이 소유한 awareness clientId. 다른 노드가 덮어쓰지 못한다. */
+  localClientIds: ReadonlySet<number>;
+}
+
 interface ItemId {
   client: number;
   clock: number;
@@ -101,6 +107,49 @@ function cursorState(value: unknown): CursorState | null | typeof INVALID_CURSOR
   const head = relativePosition(value.head);
   if (!anchor || !head) return INVALID_CURSOR;
   return { anchor, head };
+}
+
+const USER_ID_PATTERN = /^[1-9][0-9]{0,18}$/;
+
+function remoteUser(value: unknown): { id: string; name: string; color: string } | null {
+  if (!isRecord(value)) return null;
+  const { id, name } = value;
+  if (typeof id !== "string" || !USER_ID_PATTERN.test(id)) return null;
+  if (typeof name !== "string" || name.trim().length === 0 || Array.from(name).length > 200) return null;
+  const numericId = Number(id);
+  if (!Number.isSafeInteger(numericId)) return null;
+  return { id, name, color: participantColor(numericId) };
+}
+
+/**
+ * 다른 노드가 Redis fan-out으로 보낸 awareness(높음-2). 그 노드가 자기 연결의 인증 context로 이미
+ * `applyAuthoritativeAwareness`를 적용한 결과라 연결 context가 없다 — 예전에는 MISSING_CONTEXT로 전부
+ * 버려 다른 노드 사람의 커서·참여자가 보이지 않았다.
+ *
+ * Redis는 내부 신뢰 경계(수신 채널·room은 fan-out 가드가 이미 확인)이지만 그래도 형식은 다시 좁힌다:
+ * 이 노드 연결이 소유한 clientId는 덮어쓰지 못하게 버리고(되돌아온 echo 포함), user는 id·name만 받아
+ * 색을 다시 계산하며, cursor는 같은 검증을 거친다. 형식이 틀린 항목만 버리고 나머지는 통과시킨다.
+ */
+export function applyRemoteAwareness(input: RemoteAwarenessInput): { dropped: number } {
+  const { states, localClientIds } = input;
+  let dropped = 0;
+  for (const [clientId, state] of states) {
+    if (localClientIds.has(clientId)) {
+      states.delete(clientId);
+      continue;
+    }
+    const valid = Number.isSafeInteger(clientId) && clientId >= 0 && clientId <= 0xffff_ffff && isRecord(state);
+    const user = valid ? remoteUser(state.user) : null;
+    const cursor = valid ? cursorState(state.cursor) : INVALID_CURSOR;
+    if (!user || cursor === INVALID_CURSOR) {
+      // 빈 state(초기 상태)는 형식 오류가 아니라 아직 아무것도 없다는 뜻이다 — 조용히 뺀다.
+      if (!(isRecord(state) && Object.keys(state).length === 0)) dropped += 1;
+      states.delete(clientId);
+      continue;
+    }
+    states.set(clientId, { ...(cursor === null ? {} : { cursor }), user });
+  }
+  return { dropped };
 }
 
 /**

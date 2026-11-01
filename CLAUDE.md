@@ -69,6 +69,21 @@ pnpm start
   **메시지 안 문서 이름 == 채널의 room**일 때만 넘긴다(모든 메시지 종류: Sync·SyncReply·Awareness·QueryAwareness·
   Stateless·BroadcastStateless). 옛 채널 메시지는 버리고 그 채널을 다시 해제한다. 구독 해제 실패분은 추적해 재연결
   (`ready`) 때 다시 해제한다(ioredis가 옛 구독을 자동 복구하므로). 이 수신 가드를 빼지 않는다.
+- **단조 저장(높음-3)**: 저장 UPDATE는 리셋 세대 가드에 더해 이 노드가 마지막으로 읽거나 쓴 행 `version`을
+  가드로 건다. 빗나가면(다른 노드·게시가 그 사이 씀) 행을 다시 읽어 `Y.mergeUpdates([DB, 메모리])`로 합친 결과를
+  쓰고, DB에만 있던 내용은 메모리 문서에 `Y.applyUpdate`로 흡수한다(최대 3회). 전체 상태 덮어쓰기로 되돌리지
+  않는다 — Redis 순단 중 뒤처진 노드가 앞선 편집을 지운다.
+- **저장 상한(높음-4)**: 병합 결과가 `MAX_DOCUMENT_BYTES`를 넘으면 `DocumentTooLargeError` → 그 room 연결을
+  close **4413**으로 닫고 문서를 저장 없이 내린다(error 로그 `collaboration_document_too_large`). DB에는 상한 안의
+  마지막 저장본이 남는다. 클라이언트는 4413에서 재연결하지 않는다(같은 큰 상태를 다시 올리므로).
+- **원격 awareness(높음-2)**: Redis로 온 awareness(origin `redis`, 연결 context 없음)는 `applyRemoteAwareness`로
+  형식만 좁혀 통과시킨다(이 노드 연결 소유 clientId 덮어쓰기 금지, user는 id·name만 받아 색 재계산, cursor 검증).
+  MISSING_CONTEXT로 전부 버리던 동작으로 되돌리지 않는다.
+- **권한 재확인(높음-1)**: 채널 `wiki:collaboration:revoke`(`{"rooms":["page:<id>",...]}`, 1~200개)를 받으면 그
+  room 연결을 close **4401**로 닫는다. 주기 재인증으로 연결된 지 `COLLABORATION_REAUTH_INTERVAL_MS`(기본 5분,
+  최대 1시간)가 지난 연결도 같은 코드로 닫는다. provider가 새 티켓(wiki-backend EDIT 재판정)으로 다시 붙으므로
+  권한을 잃었으면 재연결에서 막힌다. wiki-backend는 휴지통 보내기·부모/스페이스 이동·페이지 제한 교체 커밋 후,
+  공동 초안 행이 있는 room에만 보낸다.
 
 ## 완료 기준
 

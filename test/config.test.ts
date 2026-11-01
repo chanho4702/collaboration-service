@@ -11,6 +11,7 @@ describe("service config", () => {
       databaseUrl: "postgresql://keycloak:keycloak@localhost:5433/wikidb",
       maxDocumentBytes: 10 * 1024 * 1024,
       shutdownTimeoutMs: 10_000,
+      reauthIntervalMs: 5 * 60_000,
     });
   });
 
@@ -28,6 +29,8 @@ describe("service config", () => {
     expect(() => loadConfig({ PORT: "65536" })).toThrow("PORT");
     expect(() => loadConfig({ DATABASE_URL: "mysql://localhost/wiki" })).toThrow("DATABASE_URL");
     expect(() => loadConfig({ MAX_DOCUMENT_BYTES: "0" })).toThrow("MAX_DOCUMENT_BYTES");
+    // 재인증 간격은 권한 회수 반영의 상한이다 — 1시간보다 길게 둘 수 없다
+    expect(() => loadConfig({ COLLABORATION_REAUTH_INTERVAL_MS: "3600001" })).toThrow("COLLABORATION_REAUTH_INTERVAL_MS");
     expect(() => loadConfig({ COLLABORATION_INSTANCE_ID: "공백 노드" }))
       .toThrow("COLLABORATION_INSTANCE_ID");
   });

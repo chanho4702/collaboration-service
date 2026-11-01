@@ -6,6 +6,8 @@ export interface ServiceConfig {
   databaseUrl: string;
   maxDocumentBytes: number;
   shutdownTimeoutMs: number;
+  /** 연결 하나가 재인증(새 티켓) 없이 유지되는 최대 시간. 권한 회수가 열린 세션에 반영되는 상한이다. */
+  reauthIntervalMs: number;
 }
 
 function instanceId(value: string | undefined): string {
@@ -58,5 +60,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     databaseUrl,
     maxDocumentBytes: integer("MAX_DOCUMENT_BYTES", env.MAX_DOCUMENT_BYTES, 10 * 1024 * 1024),
     shutdownTimeoutMs: integer("SHUTDOWN_TIMEOUT_MS", env.SHUTDOWN_TIMEOUT_MS, 10_000),
+    // 기본 5분, 최대 1시간 — 더 길면 권한 회수 상한으로서 의미가 없다.
+    reauthIntervalMs: integer(
+      "COLLABORATION_REAUTH_INTERVAL_MS",
+      env.COLLABORATION_REAUTH_INTERVAL_MS,
+      5 * 60_000,
+      60 * 60_000,
+    ),
   };
 }

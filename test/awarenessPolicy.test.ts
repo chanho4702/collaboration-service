@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CollaborationContext } from "../src/authentication.js";
-import { applyAuthoritativeAwareness } from "../src/awarenessPolicy.js";
+import { applyAuthoritativeAwareness, applyRemoteAwareness } from "../src/awarenessPolicy.js";
 
 const context: CollaborationContext = {
   user: { id: 42, name: "Alice" },
@@ -133,5 +133,36 @@ describe("authoritative awareness policy", () => {
       cursor: { anchor: { tname: {} }, head: cursor.head },
     }]]);
     expect(apply(states)).toEqual({ accepted: false, reason: "INVALID_CURSOR" });
+  });
+});
+
+describe("remote(다른 노드) awareness policy — 높음-2", () => {
+  it("다른 노드가 인증 context로 다시 쓴 참여자·커서는 통과시키고 색은 다시 계산한다", () => {
+    const states = new Map<number, Record<string, unknown>>([[555, {
+      user: { id: "42", name: "Alice", color: "url(https://evil.example)" },
+      cursor,
+      admin: true,
+    }]]);
+
+    expect(applyRemoteAwareness({ states, localClientIds: new Set() })).toEqual({ dropped: 0 });
+    expect(states.get(555)).toEqual({ cursor, user: { id: "42", name: "Alice", color: "#0c66e4" } });
+  });
+
+  it("이 노드 연결이 소유한 clientId는 다른 노드가 덮어쓰지 못한다(되돌아온 echo 포함)", () => {
+    const states = new Map<number, Record<string, unknown>>([[123, { user: { id: "7", name: "Bob" } }]]);
+    applyRemoteAwareness({ states, localClientIds: new Set([123]) });
+    expect(states.size).toBe(0);
+  });
+
+  it("형식이 틀린 항목만 버리고 나머지는 남긴다", () => {
+    const states = new Map<number, Record<string, unknown>>([
+      [1, { user: { id: "x1", name: "Mallory" } }],
+      [2, { user: { id: "8", name: "Carol" }, cursor: { anchor: "bad" } }],
+      [3, {}],
+      [4, { user: { id: "9", name: "Dave" } }],
+    ]);
+
+    expect(applyRemoteAwareness({ states, localClientIds: new Set() })).toEqual({ dropped: 2 });
+    expect([...states.keys()]).toEqual([4]);
   });
 });

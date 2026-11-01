@@ -7,11 +7,13 @@ import {
   parseResetSignal,
   RESET_CLOSE_CODE,
   RESET_CLOSE_REASON,
+  TOO_LARGE_CLOSE_CODE,
+  TOO_LARGE_CLOSE_REASON,
   type ResetConnection,
   type ResetDocument,
   type ResetHost,
 } from "../src/documentReset.js";
-import type { DocumentResetState } from "../src/documentStore.js";
+import { DocumentTooLargeError, type DocumentResetState } from "../src/documentStore.js";
 import type { Logger } from "../src/logger.js";
 
 function logger(): Logger {
@@ -19,7 +21,7 @@ function logger(): Logger {
 }
 
 function telemetry() {
-  return { documentStored: vi.fn(), documentStoreFailed: vi.fn(), documentReset: vi.fn() };
+  return { documentStored: vi.fn(), documentStoreFailed: vi.fn(), documentReset: vi.fn(), documentTooLarge: vi.fn() };
 }
 
 function fakeConnection() {
@@ -152,6 +154,52 @@ describe("DocumentResetCoordinator", () => {
     expect(dependencies.telemetry.documentReset).toHaveBeenCalledTimes(1);
     expect(connections[0]!.close).toHaveBeenCalledTimes(1);
     expect(dependencies.log.warn).not.toHaveBeenCalled();
+  });
+
+  it("저장 상한을 넘으면 조용히 넘기지 않고 접속자 전원을 4413으로 닫고 저장 없이 내린다(높음-4)", async () => {
+    const { dependencies, coordinator, document, host, connections } = loadedDocument(
+      { store: new DocumentTooLargeError(11, 10) },
+      [fakeConnection(), fakeConnection()],
+    );
+
+    // 예외를 던지지 않는다 — 던지면 Hocuspocus가 큰 문서를 메모리에 붙잡아 새 접속자가 다시 붙는다.
+    await expect(coordinator.store("page:7", document, Uint8Array.from([1]))).resolves.toBeUndefined();
+
+    for (const connection of connections) {
+      expect(connection.close).toHaveBeenCalledWith({ code: TOO_LARGE_CLOSE_CODE, reason: TOO_LARGE_CLOSE_REASON });
+      expect(connection.webSocket.close).toHaveBeenCalledWith(4413, TOO_LARGE_CLOSE_REASON);
+    }
+    expect(dependencies.telemetry.documentTooLarge).toHaveBeenCalledWith("page:7", 11, 10);
+    expect(dependencies.telemetry.documentReset).toHaveBeenCalledWith("page:7", "too_large", 2);
+    expect(dependencies.telemetry.documentStoreFailed).not.toHaveBeenCalled();
+    expect(host.unloadDocument).toHaveBeenCalledWith(document);
+
+    // 내려가는 동안 같은 문서에 붙으려는 연결도 같은 이유(4413)로 닫는다.
+    const late = fakeConnection();
+    expect(coordinator.guardConnection({ documentName: "page:7", document, connection: late, draftEpoch: 3 }))
+      .toBe(false);
+    expect(late.webSocket.close).toHaveBeenCalledWith(4413, TOO_LARGE_CLOSE_REASON);
+  });
+
+  it("DB에만 있던 내용은 absorb로 메모리 문서에 넘긴다(높음-3)", async () => {
+    const absorb = vi.fn();
+    const context = setup();
+    const store = vi.fn(async (_room: string, _state: Uint8Array, _epoch: number, onPersisted?: (s: Uint8Array) => void) => {
+      onPersisted?.(Uint8Array.from([7]));
+      return true;
+    });
+    const coordinator = new DocumentResetCoordinator<FakeDocument>({
+      ...context.dependencies,
+      documents: { ...context.dependencies.documents, store },
+      absorb,
+    });
+    const document = new FakeDocument("page:7");
+    coordinator.attach(fakeHost(document));
+    coordinator.loaded("page:7", document, 3);
+
+    await coordinator.store("page:7", document, Uint8Array.from([1]));
+
+    expect(absorb).toHaveBeenCalledWith(document, Uint8Array.from([7]));
   });
 
   it("이미 닫힌 socket에는 close frame을 다시 보내지 않는다", async () => {

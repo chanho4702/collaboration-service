@@ -141,7 +141,7 @@ interface NodeOptions {
 
 /** index.ts와 같은 hook 배선으로 노드 하나를 만든다. */
 function createNode(id: string, row: DraftRow, options: NodeOptions = {}) {
-  const events = { documentStored: vi.fn(), documentStoreFailed: vi.fn(), documentReset: vi.fn() };
+  const events = { documentStored: vi.fn(), documentStoreFailed: vi.fn(), documentReset: vi.fn(), documentTooLarge: vi.fn() };
   let fanout: EpochIsolatedRedisFanout | undefined;
   const coordinator = new DocumentResetCoordinator<Document>({
     documents: row,

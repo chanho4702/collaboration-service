@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import * as Y from "yjs";
 
 const ROOM_PATTERN = /^page:[1-9][0-9]*$/;
 
@@ -6,7 +7,15 @@ interface StoredDocumentRow {
   state: Buffer;
   reset_epoch: string | number;
   reset_pending: boolean;
+  version: string | number;
 }
+
+interface VersionRow {
+  version: string | number;
+}
+
+/** 다른 노드가 앞서 저장해 버전 가드가 빗나가면 DB 정본과 병합해 다시 쓴다. 이 횟수를 넘기면 저장 실패다. */
+const MAX_STORE_ATTEMPTS = 3;
 
 interface ResetStateRow {
   reset_epoch: string | number;
@@ -41,6 +50,20 @@ export interface BootstrapDocumentResult {
 
 type DocumentPool = Pick<Pool, "query" | "end">;
 
+/**
+ * Yjs 문서가 저장 상한(MAX_DOCUMENT_BYTES)을 넘었다. 조용히 미저장으로 남기지 않도록 호출자가 연결을 닫고
+ * 클라이언트에 알린다(높음-4).
+ */
+export class DocumentTooLargeError extends Error {
+  constructor(
+    readonly byteLength: number,
+    readonly maxBytes: number,
+  ) {
+    super(`Yjs 문서 크기는 1~${maxBytes} bytes여야 합니다`);
+    this.name = "DocumentTooLargeError";
+  }
+}
+
 /** v2 ticket의 draftEpoch가 초안 행의 reset_epoch와 달라 bootstrap claim을 거부했다. */
 export class DraftEpochMismatchError extends Error {
   constructor() {
@@ -51,6 +74,12 @@ export class DraftEpochMismatchError extends Error {
 
 /** Yjs 정본을 변환 없이 bytea로 저장한다. Markdown/JSON 변환은 publish 경계의 별도 책임이다. */
 export class CollaborationDocumentStore {
+  /**
+   * room별로 이 노드가 마지막으로 읽거나 쓴 행 version. 저장 때 이 값과 DB version이 같으면 그 사이 다른
+   * 노드가 쓰지 않은 것이므로 병합 없이 덮어쓴다. 다르면 DB 정본과 Y.mergeUpdates로 병합해 단조 저장한다.
+   */
+  private readonly versions = new Map<string, number>();
+
   constructor(
     private readonly pool: DocumentPool,
     private readonly maxDocumentBytes: number,
@@ -87,11 +116,12 @@ export class CollaborationDocumentStore {
   async fetch(documentName: string): Promise<LoadedDocument | null> {
     this.requireRoom(documentName);
     const result = await this.pool.query<StoredDocumentRow>(
-      "SELECT state, reset_epoch, reset_pending FROM collaboration_document WHERE room = $1",
+      "SELECT state, reset_epoch, reset_pending, version FROM collaboration_document WHERE room = $1",
       [documentName],
     );
     const row = result.rows[0];
     if (!row || row.reset_pending) return null;
+    this.versions.set(documentName, Number(row.version));
     // Buffer의 더 큰 backing ArrayBuffer를 노출하지 않도록 정확한 범위만 복사한다.
     return { state: Uint8Array.from(row.state), resetEpoch: Number(row.reset_epoch) };
   }
@@ -111,26 +141,68 @@ export class CollaborationDocumentStore {
    * 로드한 리셋 세대의 정상 초안만 갱신한다(UPDATE 전용). 행은 bootstrap만 만든다.
    * reset_epoch는 리셋 때만 오르므로 정상 게시(generation+1) 뒤에도 저장은 계속 성공한다.
    * 0행이면 그 사이 다른 경로 저장으로 초안이 리셋됐거나 사라진 stale 문서이므로 false를 반환한다.
+   *
+   * 단조 저장(높음-3): 다중 노드에서 Redis 순단으로 fan-out이 끊기면 노드마다 다른 내용을 들고 있게 된다.
+   * 전체 상태 덮어쓰기면 뒤처진 노드의 저장이 앞선 노드의 편집을 지운다. 그래서 행 version으로 "그 사이
+   * 다른 노드가 썼는지"를 같은 UPDATE 문장에서 확인하고, 썼으면 DB 정본과 `Y.mergeUpdates`로 합친 결과를
+   * 쓴다(CRDT 병합이라 어느 쪽 편집도 잃지 않는다). DB에만 있던 내용은 `absorb`로 메모리 문서에도 넣어
+   * 이 노드의 접속자에게 보낸다.
    */
-  async store(documentName: string, state: Uint8Array, resetEpoch: number): Promise<boolean> {
+  async store(
+    documentName: string,
+    state: Uint8Array,
+    resetEpoch: number,
+    absorb?: (persisted: Uint8Array) => void,
+  ): Promise<boolean> {
     this.requireRoom(documentName);
     this.requireState(state);
     if (!Number.isSafeInteger(resetEpoch) || resetEpoch < 0) {
       throw new Error("공동 초안 리셋 세대는 0 이상의 정수여야 합니다");
     }
-    const result = await this.pool.query(
-      `
-        UPDATE collaboration_document
-        SET state = $2,
-            version = version + 1,
-            updated_at = now()
-        WHERE room = $1
-          AND reset_epoch = $3
-          AND NOT reset_pending
-      `,
-      [documentName, Buffer.from(state), resetEpoch],
-    );
-    return (result.rowCount ?? 0) > 0;
+    let next = state;
+    let expectedVersion = this.versions.get(documentName);
+    for (let attempt = 0; attempt < MAX_STORE_ATTEMPTS; attempt++) {
+      if (expectedVersion !== undefined) {
+        const result = await this.pool.query<VersionRow>(
+          `
+            UPDATE collaboration_document
+            SET state = $2,
+                version = version + 1,
+                updated_at = now()
+            WHERE room = $1
+              AND reset_epoch = $3
+              AND NOT reset_pending
+              AND version = $4
+            RETURNING version
+          `,
+          [documentName, Buffer.from(next), resetEpoch, expectedVersion],
+        );
+        const written = result.rows[0];
+        if (written) {
+          this.versions.set(documentName, Number(written.version));
+          return true;
+        }
+      }
+      // 버전 가드가 빗나갔거나(다른 노드·게시가 씀) 이 노드가 아직 버전을 모른다 — 현재 행을 읽어 판단한다.
+      const current = await this.pool.query<StoredDocumentRow>(
+        "SELECT state, reset_epoch, reset_pending, version FROM collaboration_document WHERE room = $1",
+        [documentName],
+      );
+      const row = current.rows[0];
+      if (!row || row.reset_pending || Number(row.reset_epoch) !== resetEpoch) return false;
+      const persisted = Uint8Array.from(row.state);
+      const merged = Y.mergeUpdates([persisted, next]);
+      this.requireState(merged);
+      absorb?.(persisted);
+      next = merged;
+      expectedVersion = Number(row.version);
+    }
+    throw new Error("공동 편집 문서 저장이 다른 노드와 계속 경합합니다");
+  }
+
+  /** 문서를 메모리에서 내리면 기억한 버전을 잊는다(다음 로드가 새로 읽는다). */
+  forget(documentName: string): void {
+    this.versions.delete(documentName);
   }
 
   /**
@@ -266,8 +338,11 @@ export class CollaborationDocumentStore {
 
 
   private requireState(state: Uint8Array): void {
-    if (state.byteLength === 0 || state.byteLength > this.maxDocumentBytes) {
+    if (state.byteLength === 0) {
       throw new Error(`Yjs 문서 크기는 1~${this.maxDocumentBytes} bytes여야 합니다`);
+    }
+    if (state.byteLength > this.maxDocumentBytes) {
+      throw new DocumentTooLargeError(state.byteLength, this.maxDocumentBytes);
     }
   }
 }

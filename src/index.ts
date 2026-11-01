@@ -2,18 +2,24 @@ import { Server, type Document } from "@hocuspocus/server";
 import { Database } from "@hocuspocus/extension-database";
 import { Redis } from "ioredis";
 import { Pool } from "pg";
+import * as Y from "yjs";
 import { createAuthenticator } from "./authentication.js";
 import { loadConfig } from "./config.js";
 import { CollaborationDocumentStore } from "./documentStore.js";
 import { installStructuredConsoleError, logger } from "./logger.js";
 import { createBootstrapHttpHandler } from "./bootstrapHttp.js";
-import { applyAuthoritativeAwareness } from "./awarenessPolicy.js";
+import { applyAuthoritativeAwareness, applyRemoteAwareness } from "./awarenessPolicy.js";
 import type { CollaborationContext } from "./authentication.js";
 import { EpochIsolatedRedisFanout, redisFanoutConfiguration } from "./fanout.js";
 import { CollaborationTelemetry } from "./telemetry.js";
 import { DocumentResetCoordinator, RESET_CHANNEL } from "./documentReset.js";
+import { REVOKE_CHANNEL, SessionReauthorizer } from "./sessionReauth.js";
 
 installStructuredConsoleError();
+
+function isRedisOrigin(origin: unknown): boolean {
+  return typeof origin === "object" && origin !== null && (origin as { source?: unknown }).source === "redis";
+}
 const config = loadConfig();
 const redis = new Redis(config.redisUrl, {
   enableOfflineQueue: false,
@@ -39,6 +45,9 @@ const resets = new DocumentResetCoordinator<Document>({
   telemetry,
   log: logger,
   publish: (message) => redis.publish(RESET_CHANNEL, message),
+  // 저장 때 DB에만 있던 다른 노드의 편집(Redis 순단 중 갈라진 내용)을 메모리 문서에 합쳐 이 노드의
+  // 접속자에게도 보낸다. connection이 아닌 origin이라 Hocuspocus가 전원에게 중계하고 다른 노드에도 퍼진다.
+  absorb: (document, persisted) => Y.applyUpdate(document, persisted, { source: "local" }),
   // 리셋된 옛 문서가 언로드 대기(disconnectDelay) 동안 같은 epoch 피어와 주고받지 않게 즉시 끊는다.
   onReset: (documentName) => fanout.detach(documentName),
 });
@@ -47,11 +56,14 @@ const fanout = new EpochIsolatedRedisFanout(
   redisFanoutConfiguration(config.redisUrl, config.instanceId),
   (documentName) => resets.epochOf(documentName),
 );
+// 권한 회수(휴지통·이동·제한 변경 신호)와 주기 재인증으로 연결을 닫아 새 티켓으로만 다시 붙게 한다(높음-1).
+const reauth = new SessionReauthorizer<Document>({ intervalMs: config.reauthIntervalMs, log: logger });
 // pub/sub 구독 연결은 명령을 보낼 수 없으므로 ticket GETDEL 연결과 분리한다. fan-out extension의
 // 연결과도 별개다. 재연결 시 ioredis가 자동으로 다시 구독한다.
 const resetSubscriber = redis.duplicate();
 resetSubscriber.on("message", (channel: string, message: string) => {
   if (channel === RESET_CHANNEL) resets.handleSignal(message);
+  else if (channel === REVOKE_CHANNEL) reauth.handleSignal(message);
 });
 resetSubscriber.on("error", (error: Error) => {
   // 신호는 즉시 끊기 위한 최적화다. 정확성은 저장 세대 가드가 보장하므로 경고만 남긴다.
@@ -61,7 +73,7 @@ resetSubscriber.on("error", (error: Error) => {
 try {
   await redis.connect();
   await resetSubscriber.connect();
-  await resetSubscriber.subscribe(RESET_CHANNEL);
+  await resetSubscriber.subscribe(RESET_CHANNEL, REVOKE_CHANNEL);
   await documents.initialize();
 } catch (error) {
   logger.error("collaboration_dependency_startup_failed", {
@@ -110,6 +122,7 @@ const server = new Server<CollaborationContext>({
   },
   async afterUnloadDocument({ documentName }) {
     resets.afterUnload(documentName);
+    documents.forget(documentName);
   },
   // 모든 수신 메시지(인증 전 큐 포함)가 문서에 적용되기 전에 티켓 draftEpoch·받은 리셋 신호와 실제 로드
   // 문서의 epoch를 대조한다. 어긋나면 4409로 닫고 메시지를 적용하지 않는다.
@@ -122,7 +135,24 @@ const server = new Server<CollaborationContext>({
     documentName,
     states,
     connection,
+    transactionOrigin,
   }) {
+    // 다른 노드에서 Redis로 온 awareness에는 연결 context가 없다. 그 노드가 이미 인증 context로 다시 쓴
+    // 결과이므로 형식만 좁혀 통과시킨다(높음-2). 이 노드 연결 소유 clientId는 덮어쓰지 못한다.
+    if (!connection && isRedisOrigin(transactionOrigin)) {
+      const localClientIds = new Set<number>();
+      for (const local of document.getConnections()) {
+        for (const clientId of document.getClients(local)) localClientIds.add(clientId);
+      }
+      const { dropped } = applyRemoteAwareness({ states, localClientIds });
+      if (dropped > 0) {
+        logger.warn("collaboration_remote_awareness_dropped", {
+          pageId: Number(documentName.slice("page:".length)),
+          dropped,
+        });
+      }
+      return;
+    }
     const result = applyAuthoritativeAwareness({
       context,
       documentName,
@@ -146,6 +176,7 @@ const server = new Server<CollaborationContext>({
   },
   async connected({ context, socketId, connection, documentName }) {
     telemetry.connected({ context, socketId });
+    reauth.connected(connection);
     // 메시지를 보내지 않는 연결도 로드 중 받은 리셋 신호·epoch 불일치를 바로 통지받게 한다.
     resets.guardConnection({
       documentName,
@@ -164,6 +195,7 @@ const server = new Server<CollaborationContext>({
     }
   },
   async onListen({ port }) {
+    reauth.start();
     logger.info("collaboration_listening", {
       host: config.host,
       port,
@@ -174,6 +206,7 @@ const server = new Server<CollaborationContext>({
 });
 
 resets.attach(server.hocuspocus);
+reauth.attach(server.hocuspocus);
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
@@ -187,6 +220,7 @@ async function shutdown(signal: string): Promise<void> {
   }, config.shutdownTimeoutMs);
   timeout.unref();
 
+  reauth.stop();
   try {
     await server.destroy();
     await Promise.all([redis.quit(), resetSubscriber.quit(), documents.close()]);
