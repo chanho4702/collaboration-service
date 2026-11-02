@@ -12,6 +12,7 @@ describe("service config", () => {
       maxDocumentBytes: 10 * 1024 * 1024,
       shutdownTimeoutMs: 10_000,
       reauthIntervalMs: 5 * 60_000,
+      revokeSkewMs: 2_000,
     });
   });
 

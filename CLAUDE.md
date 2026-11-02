@@ -82,9 +82,12 @@ pnpm start
   MISSING_CONTEXT로 전부 버리던 동작으로 되돌리지 않는다.
 - **권한 재확인(높음-1)**: 채널 `wiki:collaboration:revoke`(`{"rooms":["page:<id>",...],"revokedAt":"<ISO>"}`,
   1~200개)를 받으면 그 room 연결을 close **4401**로 닫는다. 신호가 인증·로딩 중에 지나간 연결을 놓치지 않도록
-  room별 최근 `revokedAt`(wiki-backend 시계)을 6분(티켓 TTL 상한 5분보다 길게) 보관하고, `connected`와
-  `beforeHandleMessage`에서 context의 `ticketIssuedAt`(같은 시계)이 그보다 늦지 않으면 4401로 닫는다(발급 시각을
-  모르면 fail-closed). 주기 재인증은 연결 수명이 `COLLABORATION_REAUTH_INTERVAL_MS`(기본 5분, 최대 1시간)를 넘지
+  room별 최근 `revokedAt`(wiki-backend 커밋 후 시각)을 6분(티켓 TTL 상한 5분보다 길게) 보관하고, `connected`와
+  `beforeHandleMessage`에서 context의 `ticketIssuedAt`이 `revokedAt + COLLABORATION_REVOKE_SKEW_MS`(기본 2초, 여러
+  wiki 노드 시계 차) 이하면 4401로 닫는다(발급 시각을 모르면 fail-closed). wiki-backend는 `issuedAt`을 권한 조회
+  **전에** 찍는다(티켓이 근거로 삼은 권한 상태의 상한). 여유를 넘는 시계 차나 정확한 순서는 보장하지 않으며 세대
+  카운터도 두지 않는다 — 그 틈은 주기 재인증이 상한을 받친다. `revokedAt` 없는 신호는 다른 시계로 대신하지 않고
+  그 room의 열린 연결만 닫으며 기록하지 않는다(경고 로그). 주기 재인증은 연결 수명이 `COLLABORATION_REAUTH_INTERVAL_MS`(기본 5분, 최대 1시간)를 넘지
   않게 점검 주기(간격/4, 최대 30초)만큼 일찍 닫는다. provider가 새 티켓(wiki-backend EDIT 재판정)으로 다시 붙으므로
   권한을 잃었으면 재연결에서 막힌다. wiki-backend는 휴지통 보내기·부모/스페이스 이동·페이지 제한 교체 커밋 후,
   영향받은 페이지 room 전부에 보낸다(초안 행 유무로 거르지 않는다 — 커밋 사이에 새로 열린 세션도 받아야 한다).

@@ -175,12 +175,14 @@ describe("SessionReauthorizer — 높음-1", () => {
         reason: "revoked_ticket",
         closedConnections: 1,
       });
-      // 같은 시각에 발급된 티켓도 회수 전 것으로 본다
-      expect(reauth.guardConnection({
-        documentName: "page:7",
-        connection: fakeConnection(),
-        context: { ticketIssuedAt: Date.parse(revokedAt) },
-      })).toBe(false);
+      // 같은 시각, 그리고 시계 여유(기본 2초) 안의 발급도 회수 전 것으로 본다
+      for (const issued of [Date.parse(revokedAt), Date.parse(revokedAt) + 2_000]) {
+        expect(reauth.guardConnection({
+          documentName: "page:7",
+          connection: fakeConnection(),
+          context: { ticketIssuedAt: issued },
+        })).toBe(false);
+      }
     });
 
     it("회수 뒤에 발급된 티켓(권한 재판정을 통과)은 통과하고, 다른 room은 영향이 없다", () => {
@@ -192,7 +194,7 @@ describe("SessionReauthorizer — 높음-1", () => {
       expect(reauth.guardConnection({
         documentName: "page:7",
         connection: fresh,
-        context: { ticketIssuedAt: Date.parse("2026-11-02T00:00:11Z") },
+        context: { ticketIssuedAt: Date.parse("2026-11-02T00:00:12Z") + 1 },
       })).toBe(true);
       expect(reauth.guardConnection({
         documentName: "page:8",
@@ -200,6 +202,34 @@ describe("SessionReauthorizer — 높음-1", () => {
         context: { ticketIssuedAt: 0 },
       })).toBe(true);
       expect(fresh.close).not.toHaveBeenCalled();
+    });
+
+    it("revokedAt 없는 신호는 다른 시계로 대신하지 않는다 — 열린 연결만 닫고 기록하지 않는다(경고)", () => {
+      const { reauth, log } = setup();
+      const open = fakeConnection();
+      reauth.attach({ documents: new Map([["page:7", new FakeDocument("page:7", [open])]]) });
+
+      reauth.handleSignal(JSON.stringify({ rooms: ["page:7"] }));
+
+      expect(open.webSocket.close).toHaveBeenCalledWith(4401, REAUTH_CLOSE_REASON);
+      expect(log.warn).toHaveBeenCalledWith("collaboration_revoke_signal_without_revoked_at", { rooms: 1 });
+      // 기록이 없으니 늦게 붙는 연결은 대조 대상이 아니다(재연결 티켓은 백엔드가 현재 권한으로 판정)
+      expect(reauth.guardConnection({
+        documentName: "page:7",
+        connection: fakeConnection(),
+        context: { ticketIssuedAt: 0 },
+      })).toBe(true);
+    });
+
+    it("시계 여유는 설정으로 바꿀 수 있다", () => {
+      const reauth = new SessionReauthorizer<FakeDocument>({ intervalMs: 1_000, log: logger(), revokeSkewMs: 10_000 });
+      reauth.attach({ documents: new Map() });
+      reauth.handleSignal(JSON.stringify({ rooms: ["page:7"], revokedAt }));
+      expect(reauth.guardConnection({
+        documentName: "page:7",
+        connection: fakeConnection(),
+        context: { ticketIssuedAt: Date.parse(revokedAt) + 5_000 },
+      })).toBe(false);
     });
 
     it("발급 시각을 모르면 닫고(fail-closed), 메시지 경로는 던져서 적용을 막는다", () => {

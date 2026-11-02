@@ -13,7 +13,10 @@ import type { Logger } from "./logger.js";
  * - wiki-backend 신호(`wiki:collaboration:revoke`, 커밋 후): 그 room의 연결을 즉시 닫는다. 신호가 지나갈 때
  *   아직 인증·문서 로딩 중이라 문서에 붙지 않은 연결도 있으므로, room별 최근 회수 시각(`revokedAt`, wiki-backend
  *   시계)을 티켓 TTL보다 길게 보관하고 `connected`·메시지 적용 전에 티켓 발급 시각(같은 시계)과 대조한다.
- *   발급이 회수보다 늦지 않으면(같으면 포함) 4401로 닫는다.
+ *   wiki-backend는 발급 시각을 권한 조회 **전에** 찍으므로, 발급 시각 ≤ 회수 시각 + 여유(`revokeSkewMs`, 여러 wiki
+ *   노드의 시계 차)면 회수 전 권한을 근거로 한 티켓으로 보고 4401로 닫는다. 여유보다 큰 시계 차·정확한 순서는
+ *   보장하지 않는다 — 그 틈은 주기 재인증이 상한을 받친다(세대 카운터는 두지 않는다).
+ *   revokedAt이 없는 신호는 비교할 시각이 없으므로 그 room의 열린 연결만 닫고(fail-closed) 기록하지 않는다.
  * - 주기 재인증: 연결이 `intervalMs`를 넘겨 살아 있지 않게 닫는다. 점검 주기만큼 일찍 닫아 상한을 넘기지
  *   않는다. 신호가 빠지거나(Redis 순단) wiki-backend가 모르는 변경(org 역할·그룹)이 있어도 상한이 된다.
  */
@@ -36,9 +39,15 @@ const DEFAULT_REVOKE_RETENTION_MS = 6 * 60_000;
 
 export interface RevokeSignal {
   rooms: string[];
-  /** wiki-backend가 커밋 후 발행한 시각(epoch ms). 옛 발행자(필드 없음)면 null — 수신 시각으로 대신한다. */
+  /**
+   * wiki-backend가 커밋 후 발행한 시각(epoch ms). 없으면 null — 다른 시계(수신 시각)로 대신하지 않고, 열린 연결만
+   * 닫고 기록하지 않는다(fail-closed).
+   */
   revokedAt: number | null;
 }
+
+/** 회수 시각 비교 여유 기본값(ms) — 여러 wiki-backend 노드의 시계 차. */
+const DEFAULT_REVOKE_SKEW_MS = 2_000;
 
 /** 대조에 쓰는 연결 context 최소 표면. */
 export interface ReauthContext {
@@ -62,6 +71,8 @@ export interface SessionReauthorizerOptions {
   now?: () => number;
   /** 회수 시각 보관 시간(ms). 기본 6분. */
   revokeRetentionMs?: number;
+  /** 회수 시각 비교 여유(ms). 발급 시각이 회수 시각 + 이 값 이하면 닫는다. 기본 2초. */
+  revokeSkewMs?: number;
 }
 
 /**
@@ -119,10 +130,16 @@ export class SessionReauthorizer<D extends ReauthDocument = ReauthDocument> {
     }
     const receivedAt = this.now();
     this.pruneRevocations(receivedAt);
-    const revokedAt = signal.revokedAt ?? Date.now();
-    for (const room of signal.rooms) {
-      const current = this.revocations.get(room);
-      if (!current || current.revokedAt < revokedAt) this.revocations.set(room, { revokedAt, receivedAt });
+    const { revokedAt } = signal;
+    if (revokedAt === null) {
+      // 비교할 wiki-backend 시각이 없다 — 이 노드 시계로 대신하면 서로 다른 시계를 비교하게 된다. 열린 연결만 닫고
+      // (재연결 티켓은 백엔드가 현재 권한으로 다시 판정한다) 인증·로딩 중 연결 대조용 기록은 남기지 않는다.
+      this.options.log.warn("collaboration_revoke_signal_without_revoked_at", { rooms: signal.rooms.length });
+    } else {
+      for (const room of signal.rooms) {
+        const current = this.revocations.get(room);
+        if (!current || current.revokedAt < revokedAt) this.revocations.set(room, { revokedAt, receivedAt });
+      }
     }
     for (const room of signal.rooms) {
       const document = this.host?.documents.get(room);
@@ -155,7 +172,8 @@ export class SessionReauthorizer<D extends ReauthDocument = ReauthDocument> {
     if (!revocation) return true;
     const issuedAt = context?.ticketIssuedAt;
     // 발급 시각을 모르면 회수 이후 것인지 판단할 수 없으므로 닫는다(fail-closed).
-    if (issuedAt !== undefined && Number.isFinite(issuedAt) && issuedAt > revocation.revokedAt) return true;
+    const skew = this.options.revokeSkewMs ?? DEFAULT_REVOKE_SKEW_MS;
+    if (issuedAt !== undefined && Number.isFinite(issuedAt) && issuedAt > revocation.revokedAt + skew) return true;
     if (connection) this.close(connection);
     this.options.log.info("collaboration_sessions_reauthorized", {
       pageId: pageId(documentName),

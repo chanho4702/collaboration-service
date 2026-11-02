@@ -121,6 +121,7 @@ WebSocket은 같은 Hocuspocus listener를 공유합니다.
 | `DATABASE_URL` | `postgresql://keycloak:keycloak@localhost:5433/wikidb` | Yjs binary 정본 PostgreSQL |
 | `MAX_DOCUMENT_BYTES` | `10485760` | room별 Yjs state 최대 크기 |
 | `COLLABORATION_REAUTH_INTERVAL_MS` | `300000` | 연결 하나가 재인증(새 티켓) 없이 유지되는 최대 시간 — 권한 회수 반영 상한(최대 1시간) |
+| `COLLABORATION_REVOKE_SKEW_MS` | `2000` | 권한 회수 대조의 시계 여유 — 티켓 발급 시각이 회수 시각 + 이 값 이하면 4401(최대 1분) |
 | `SHUTDOWN_TIMEOUT_MS` | `10000` | graceful shutdown 제한 |
 
 ## 보안 계약

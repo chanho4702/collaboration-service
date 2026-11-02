@@ -57,7 +57,11 @@ const fanout = new EpochIsolatedRedisFanout(
   (documentName) => resets.epochOf(documentName),
 );
 // 권한 회수(휴지통·이동·제한 변경 신호)와 주기 재인증으로 연결을 닫아 새 티켓으로만 다시 붙게 한다(높음-1).
-const reauth = new SessionReauthorizer<Document>({ intervalMs: config.reauthIntervalMs, log: logger });
+const reauth = new SessionReauthorizer<Document>({
+  intervalMs: config.reauthIntervalMs,
+  revokeSkewMs: config.revokeSkewMs,
+  log: logger,
+});
 // pub/sub 구독 연결은 명령을 보낼 수 없으므로 ticket GETDEL 연결과 분리한다. fan-out extension의
 // 연결과도 별개다. 재연결 시 ioredis가 자동으로 다시 구독한다.
 const resetSubscriber = redis.duplicate();

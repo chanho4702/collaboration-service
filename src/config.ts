@@ -8,6 +8,8 @@ export interface ServiceConfig {
   shutdownTimeoutMs: number;
   /** 연결 하나가 재인증(새 티켓) 없이 유지되는 최대 시간. 권한 회수가 열린 세션에 반영되는 상한이다. */
   reauthIntervalMs: number;
+  /** 권한 회수 대조의 시계 여유. 티켓 발급 시각이 회수 시각 + 이 값 이하면 회수 전 티켓으로 본다. */
+  revokeSkewMs: number;
 }
 
 function instanceId(value: string | undefined): string {
@@ -67,5 +69,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
       5 * 60_000,
       60 * 60_000,
     ),
+    // 여러 wiki-backend 노드의 시계 차. 기본 2초, 최대 1분.
+    revokeSkewMs: integer("COLLABORATION_REVOKE_SKEW_MS", env.COLLABORATION_REVOKE_SKEW_MS, 2_000, 60_000),
   };
 }
