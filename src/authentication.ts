@@ -13,6 +13,11 @@ export interface CollaborationContext {
   pageVersion?: number;
   /** ticket v2의 발급 시점 초안 reset_epoch(행이 없으면 0). v1 ticket이면 없다. */
   draftEpoch?: number;
+  /**
+   * ticket 발급 시각(epoch ms, wiki-backend 시계). 권한 재확인 신호의 `revokedAt`(같은 시계)보다 이르면 회수 전에
+   * 받은 입장권이다 — 인증·로딩 중에 신호가 지나가도 `connected`·메시지 적용 전에 다시 대조해 닫는다(높음-1).
+   */
+  ticketIssuedAt?: number;
 }
 
 interface AuthenticationInput {
@@ -26,6 +31,7 @@ function toContext(payload: TicketPayload): CollaborationContext {
     pageId: payload.pageId,
     room: payload.room,
     permission: payload.permission,
+    ticketIssuedAt: Date.parse(payload.issuedAt),
     ...(payload.schemaVersion === 2
       ? { pageVersion: payload.pageVersion, draftEpoch: payload.draftEpoch }
       : {}),

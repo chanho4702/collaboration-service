@@ -166,6 +166,8 @@ describe("collaboration ticket v1", () => {
       pageId: 7,
       room: "page:7",
       permission: "EDIT",
+      // 권한 재확인 신호와 대조하는 발급 시각(epoch ms) — 높음-1
+      ticketIssuedAt: Date.parse("2026-08-16T12:00:00.000Z"),
     });
     expect(JSON.stringify(context)).not.toContain(TICKET);
     expect(context).not.toHaveProperty("pageVersion");
@@ -184,6 +186,7 @@ describe("collaboration ticket v1", () => {
       pageId: 7,
       room: "page:7",
       permission: "EDIT",
+      ticketIssuedAt: Date.parse("2026-08-16T12:00:00.000Z"),
       pageVersion: 9,
       draftEpoch: 3,
     });

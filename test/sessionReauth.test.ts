@@ -37,8 +37,11 @@ function setup(intervalMs = 1_000) {
 }
 
 describe("parseRevokeSignal", () => {
-  it("rooms 배열만 받고 중복은 하나로 줄인다", () => {
-    expect(parseRevokeSignal('{"rooms":["page:7","page:8","page:7"],"extra":1}')).toEqual(["page:7", "page:8"]);
+  it("rooms 배열과 revokedAt을 받고 중복 room은 하나로 줄인다", () => {
+    expect(parseRevokeSignal('{"rooms":["page:7","page:8","page:7"],"revokedAt":"2026-11-02T00:00:01Z","extra":1}'))
+      .toEqual({ rooms: ["page:7", "page:8"], revokedAt: Date.parse("2026-11-02T00:00:01Z") });
+    // 옛 발행자(revokedAt 없음)도 받는다
+    expect(parseRevokeSignal('{"rooms":["page:7"]}')).toEqual({ rooms: ["page:7"], revokedAt: null });
   });
 
   it.each([
@@ -48,6 +51,8 @@ describe("parseRevokeSignal", () => {
     ["room", '{"rooms":["page:0"]}'],
     ["type", '{"rooms":[7]}'],
     ["legacy-single", '{"room":"page:7"}'],
+    ["revokedAt-type", '{"rooms":["page:7"],"revokedAt":123}'],
+    ["revokedAt-format", '{"rooms":["page:7"],"revokedAt":"어제"}'],
     ["too-many", JSON.stringify({ rooms: Array.from({ length: MAX_REVOKE_ROOMS + 1 }, (_, i) => `page:${i + 1}`) })],
   ])("잘못된 %s 신호는 null이다", (_case, raw) => {
     expect(parseRevokeSignal(raw)).toBeNull();
@@ -110,6 +115,24 @@ describe("SessionReauthorizer — 높음-1", () => {
     expect(fresh.close).toHaveBeenCalledOnce();
   });
 
+  it("다음 점검까지 기다리면 상한을 넘길 연결은 지금 닫는다 — 수명이 intervalMs를 넘지 않는다", () => {
+    const { reauth, advance } = setup(1_000);
+    const connection = fakeConnection();
+    reauth.attach({ documents: new Map([["page:7", new FakeDocument("page:7", [connection])]]) });
+    reauth.connected(connection);
+    expect(reauth.sweepTickMs).toBe(250);
+
+    advance(700);
+    expect(reauth.sweep()).toBe(0); // 700 + 250 < 1000
+    advance(50);
+    expect(reauth.sweep()).toBe(1); // 750 + 250 >= 1000 — 다음 점검(1000)까지 두지 않는다
+  });
+
+  it("점검 주기는 재인증 간격의 1/4, 최대 30초다", () => {
+    expect(setup(5 * 60_000).reauth.sweepTickMs).toBe(30_000);
+    expect(setup(60_000).reauth.sweepTickMs).toBe(15_000);
+  });
+
   it("나이를 모르는 연결은 지금부터 센다(바로 닫지 않는다)", () => {
     const { reauth, advance } = setup(1_000);
     const unknown = fakeConnection();
@@ -130,5 +153,83 @@ describe("SessionReauthorizer — 높음-1", () => {
 
     expect(connection.close).toHaveBeenCalledOnce();
     expect(connection.webSocket.close).not.toHaveBeenCalled();
+  });
+
+  describe("인증·로딩 중에 지나간 회수 신호", () => {
+    const revokedAt = "2026-11-02T00:00:10Z";
+
+    it("회수 전에 발급된 티켓으로 나중에 붙은 연결은 connected에서 4401로 닫는다", () => {
+      const { reauth, log } = setup();
+      reauth.attach({ documents: new Map() }); // 신호가 올 때 이 노드에는 아직 문서가 없다(로딩 중)
+      reauth.handleSignal(JSON.stringify({ rooms: ["page:7"], revokedAt }));
+
+      const late = fakeConnection();
+      expect(reauth.guardConnection({
+        documentName: "page:7",
+        connection: late,
+        context: { ticketIssuedAt: Date.parse("2026-11-02T00:00:09Z") },
+      })).toBe(false);
+      expect(late.webSocket.close).toHaveBeenCalledWith(4401, REAUTH_CLOSE_REASON);
+      expect(log.info).toHaveBeenCalledWith("collaboration_sessions_reauthorized", {
+        pageId: 7,
+        reason: "revoked_ticket",
+        closedConnections: 1,
+      });
+      // 같은 시각에 발급된 티켓도 회수 전 것으로 본다
+      expect(reauth.guardConnection({
+        documentName: "page:7",
+        connection: fakeConnection(),
+        context: { ticketIssuedAt: Date.parse(revokedAt) },
+      })).toBe(false);
+    });
+
+    it("회수 뒤에 발급된 티켓(권한 재판정을 통과)은 통과하고, 다른 room은 영향이 없다", () => {
+      const { reauth } = setup();
+      reauth.attach({ documents: new Map() });
+      reauth.handleSignal(JSON.stringify({ rooms: ["page:7"], revokedAt }));
+
+      const fresh = fakeConnection();
+      expect(reauth.guardConnection({
+        documentName: "page:7",
+        connection: fresh,
+        context: { ticketIssuedAt: Date.parse("2026-11-02T00:00:11Z") },
+      })).toBe(true);
+      expect(reauth.guardConnection({
+        documentName: "page:8",
+        connection: fresh,
+        context: { ticketIssuedAt: 0 },
+      })).toBe(true);
+      expect(fresh.close).not.toHaveBeenCalled();
+    });
+
+    it("발급 시각을 모르면 닫고(fail-closed), 메시지 경로는 던져서 적용을 막는다", () => {
+      const { reauth } = setup();
+      reauth.attach({ documents: new Map() });
+      reauth.handleSignal(JSON.stringify({ rooms: ["page:7"], revokedAt }));
+
+      expect(reauth.guardConnection({ documentName: "page:7", connection: fakeConnection(), context: {} }))
+        .toBe(false);
+      expect(() => reauth.requireConnection({
+        documentName: "page:7",
+        connection: fakeConnection(),
+        context: { ticketIssuedAt: 1 },
+      })).toThrow(expect.objectContaining({ code: REAUTH_CLOSE_CODE }) as unknown as Error);
+    });
+
+    it("보관 시간이 지나면 회수 기록을 잊는다(티켓 TTL보다 길게 둔다)", () => {
+      const log = logger();
+      let now = 0;
+      const reauth = new SessionReauthorizer<FakeDocument>({
+        intervalMs: 1_000, log, now: () => now, revokeRetentionMs: 6 * 60_000,
+      });
+      reauth.attach({ documents: new Map() });
+      reauth.handleSignal(JSON.stringify({ rooms: ["page:7"], revokedAt }));
+      const old = { ticketIssuedAt: Date.parse("2026-11-02T00:00:00Z") };
+
+      now += 5 * 60_000;
+      expect(reauth.guardConnection({ documentName: "page:7", connection: fakeConnection(), context: old })).toBe(false);
+      now += 61_000 + 1;
+      expect(reauth.guardConnection({ documentName: "page:7", connection: fakeConnection(), context: old })).toBe(true);
+    });
   });
 });

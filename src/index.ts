@@ -128,6 +128,8 @@ const server = new Server<CollaborationContext>({
   // 문서의 epoch를 대조한다. 어긋나면 4409로 닫고 메시지를 적용하지 않는다.
   async beforeHandleMessage({ documentName, document, connection, context }) {
     resets.requireConnection({ documentName, document, connection, draftEpoch: context.draftEpoch });
+    // 회수 신호가 인증·로딩 중에 지나갔으면 회수 전 티켓의 메시지를 적용하지 않는다(높음-1).
+    reauth.requireConnection({ documentName, connection, context });
   },
   async beforeHandleAwareness({
     context,
@@ -177,6 +179,8 @@ const server = new Server<CollaborationContext>({
   async connected({ context, socketId, connection, documentName }) {
     telemetry.connected({ context, socketId });
     reauth.connected(connection);
+    // 인증·로딩 중에 회수 신호가 지나갔으면 회수 전 티켓으로 붙은 연결이다 — 리셋 대조 전에 닫는다.
+    if (!reauth.guardConnection({ documentName, connection, context })) return;
     // 메시지를 보내지 않는 연결도 로드 중 받은 리셋 신호·epoch 불일치를 바로 통지받게 한다.
     resets.guardConnection({
       documentName,

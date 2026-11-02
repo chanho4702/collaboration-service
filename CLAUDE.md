@@ -39,7 +39,8 @@ pnpm start
   v1은 배포 전환기 호환용이다(TTL 1분). Redis key namespace `ticket:v1:`은 schema와 별개라 그대로 둔다.
 - `schemaVersion` 1·2, `permission=EDIT`, `room=page:<pageId>`만 허용한다. schema별 정확한 필드 집합만 받는다.
 - timestamp는 ISO-8601이며 현재 시각 기준으로 만료 여부를 다시 확인한다. Redis TTL만 믿지 않는다.
-- 인증 성공 context에는 검증된 사용자·페이지 정보(v2면 `pageVersion`·`draftEpoch`)만 넣고 raw ticket은 남기지 않는다.
+- 인증 성공 context에는 검증된 사용자·페이지 정보(v2면 `pageVersion`·`draftEpoch`)와 티켓 발급 시각
+  `ticketIssuedAt`(epoch ms)만 넣고 raw ticket은 남기지 않는다.
 - bootstrap: v2 ticket의 `pageVersion`이 `X-Wiki-Page-Version`과 다르면 409 `{error}`. v2 ticket의 `draftEpoch`는
   claim 조건(`reset_epoch = draftEpoch`)에 넣어 같은 SQL 문장에서 원자적으로 비교하고, 맞지 않으면(행이 없는데
   epoch>0 포함) 409다. 버전을 올리지 않는 리셋(임포트 본문 재작성 등) 전에 발급된 ticket이 옛 본문으로 claim하는
@@ -79,11 +80,14 @@ pnpm start
 - **원격 awareness(높음-2)**: Redis로 온 awareness(origin `redis`, 연결 context 없음)는 `applyRemoteAwareness`로
   형식만 좁혀 통과시킨다(이 노드 연결 소유 clientId 덮어쓰기 금지, user는 id·name만 받아 색 재계산, cursor 검증).
   MISSING_CONTEXT로 전부 버리던 동작으로 되돌리지 않는다.
-- **권한 재확인(높음-1)**: 채널 `wiki:collaboration:revoke`(`{"rooms":["page:<id>",...]}`, 1~200개)를 받으면 그
-  room 연결을 close **4401**로 닫는다. 주기 재인증으로 연결된 지 `COLLABORATION_REAUTH_INTERVAL_MS`(기본 5분,
-  최대 1시간)가 지난 연결도 같은 코드로 닫는다. provider가 새 티켓(wiki-backend EDIT 재판정)으로 다시 붙으므로
+- **권한 재확인(높음-1)**: 채널 `wiki:collaboration:revoke`(`{"rooms":["page:<id>",...],"revokedAt":"<ISO>"}`,
+  1~200개)를 받으면 그 room 연결을 close **4401**로 닫는다. 신호가 인증·로딩 중에 지나간 연결을 놓치지 않도록
+  room별 최근 `revokedAt`(wiki-backend 시계)을 6분(티켓 TTL 상한 5분보다 길게) 보관하고, `connected`와
+  `beforeHandleMessage`에서 context의 `ticketIssuedAt`(같은 시계)이 그보다 늦지 않으면 4401로 닫는다(발급 시각을
+  모르면 fail-closed). 주기 재인증은 연결 수명이 `COLLABORATION_REAUTH_INTERVAL_MS`(기본 5분, 최대 1시간)를 넘지
+  않게 점검 주기(간격/4, 최대 30초)만큼 일찍 닫는다. provider가 새 티켓(wiki-backend EDIT 재판정)으로 다시 붙으므로
   권한을 잃었으면 재연결에서 막힌다. wiki-backend는 휴지통 보내기·부모/스페이스 이동·페이지 제한 교체 커밋 후,
-  공동 초안 행이 있는 room에만 보낸다.
+  영향받은 페이지 room 전부에 보낸다(초안 행 유무로 거르지 않는다 — 커밋 사이에 새로 열린 세션도 받아야 한다).
 
 ## 완료 기준
 
