@@ -14,6 +14,7 @@ import { EpochIsolatedRedisFanout, redisFanoutConfiguration } from "./fanout.js"
 import { CollaborationTelemetry } from "./telemetry.js";
 import { DocumentResetCoordinator, RESET_CHANNEL } from "./documentReset.js";
 import { REVOKE_CHANNEL, SessionReauthorizer } from "./sessionReauth.js";
+import { createMetricsHttpHandler, createMetricsRegistry } from "./metrics.js";
 
 installStructuredConsoleError();
 
@@ -197,6 +198,8 @@ const server = new Server<CollaborationContext>({
     telemetry.disconnected({ context, socketId }, clientsCount);
   },
   async onRequest({ request, response }) {
+    // 내부망 전용 메트릭(Alloy 스크레이프). 공개 경로로는 닿지 않는다 — metrics.ts 주석.
+    if (await metricsHttp(request, response)) throw null;
     if (await bootstrapHttp(request, response)) {
       // Hocuspocus의 기본 Welcome 응답이 뒤이어 쓰이지 않게 null rejection으로 hook chain을 멈춘다.
       throw null;
@@ -214,6 +217,8 @@ const server = new Server<CollaborationContext>({
 });
 
 resets.attach(server.hocuspocus);
+// 연결 수·방 수는 스크레이프 때마다 Hocuspocus에서 읽는다(상태를 따로 세지 않는다).
+const metricsHttp = createMetricsHttpHandler(createMetricsRegistry(server.hocuspocus));
 reauth.attach(server.hocuspocus);
 
 let shuttingDown = false;

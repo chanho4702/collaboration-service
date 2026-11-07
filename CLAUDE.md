@@ -92,6 +92,13 @@ pnpm start
   권한을 잃었으면 재연결에서 막힌다. wiki-backend는 휴지통 보내기·부모/스페이스 이동·페이지 제한 교체 커밋 후,
   영향받은 페이지 room 전부에 보낸다(초안 행 유무로 거르지 않는다 — 커밋 사이에 새로 열린 세션도 받아야 한다).
 
+## 메트릭
+
+- `GET /metrics`(`src/metrics.ts`, `@prometheus-io/client` — 옛 `prom-client`의 공식 후속)는 내부망 전용이다.
+  Alloy가 compose 라벨 `platform.metrics.port`·`platform.metrics.path`로 찾아 긁는다. 게이트웨이·nginx는
+  `/api/wiki/collaboration/**`만 경로 그대로 넘기므로 공개 경로로 닿지 않고, 프록시 헤더가 붙은 요청은 404로 거절한다.
+- 라벨은 `application` 하나만. 페이지 id·사용자 같은 고카디널리티 값은 메트릭 라벨로 쓰지 않는다(로그의 몫).
+
 ## 완료 기준
 
 - 동일 ticket 재사용 거부, 잘못된 room·권한·schema·만료·Redis 장애 거부 테스트.

@@ -4,7 +4,7 @@
 각 패키지의 저작권 고지와 라이선스 전문은 해당 패키지 배포본(`node_modules/<패키지>/LICENSE`)과 아래 홈페이지에 있다.
 
 - 생성: `infra-settings/scripts/notices/New-FrontendNotices.ps1` (기준 `pnpm-lock.yaml` sha256 `9af8dd08dafc`)
-- 패키지 수: 40
+- 패키지 수: 44 (2026-11-04 `@prometheus-io/client` 추가분 4개는 손으로 반영 — 생성기 재실행 시 덮어써도 된다)
 - 상표: Jira, Confluence, Atlassian은 Atlassian Pty Ltd의 상표이며 본 제품은 Atlassian과 무관합니다.
 
 ## 검토 필요 (카피레프트·소스공개·비자유·미확인 라이선스)
@@ -16,9 +16,9 @@
 | 라이선스 | 패키지 수 |
 |---|---|
 | 0BSD | 1 |
-| Apache-2.0 | 2 |
+| Apache-2.0 | 4 |
 | ISC | 2 |
-| MIT | 34 |
+| MIT | 36 |
 | UNLICENSED | 1 |
 
 ## 0BSD
@@ -31,6 +31,8 @@
 
 | 패키지 | 버전 | 저자 | 홈페이지 |
 |---|---|---|---|
+| @opentelemetry/api | 1.10.0 | OpenTelemetry Authors | https://github.com/open-telemetry/opentelemetry-js/tree/main/api |
+| @prometheus-io/client | 0.16.1 | Simon Nyberg | https://github.com/prometheus/client_js |
 | cluster-key-slot | 1.1.1 | Mike Diarmid | https://github.com/Salakar/cluster-key-slot#readme |
 | denque | 2.1.0 | Invertase | https://docs.page/invertase/denque |
 
@@ -52,6 +54,7 @@
 | @ioredis/commands | 1.11.0 | Zihua Li | https://github.com/ioredis/commands |
 | @ioredis/commands | 2.0.0 | Zihua Li | https://github.com/ioredis/commands |
 | async-mutex | 0.5.0 | Christian Speckner | https://github.com/DirtyHairy/async-mutex#readme |
+| bintrees | 1.0.2 | Vadim Graboys |  |
 | crossws | 0.4.10 |  | https://crossws.h3.dev |
 | debug | 4.4.3 | Josh Junon | https://github.com/debug-js/debug#readme |
 | ioredis | 5.6.1 | Zihua Li | https://github.com/redis/ioredis#readme |
@@ -76,6 +79,7 @@
 | redis-errors | 1.2.0 | Ruben Bridgewater | https://github.com/NodeRedis/redis-errors#readme |
 | redis-parser | 3.0.0 | Ruben Bridgewater | https://github.com/NodeRedis/node-redis-parser#readme |
 | standard-as-callback | 2.1.0 | luin | https://github.com/luin/asCallback#readme |
+| tdigest | 0.1.3 | Will Welch | https://github.com/welch/tdigest |
 | xtend | 4.0.2 | Raynos | https://github.com/Raynos/xtend |
 | y-protocols | 1.0.7 | Kevin Jahns | https://github.com/yjs/y-protocols#readme |
 | yjs | 13.6.32 | Kevin Jahns | https://docs.yjs.dev |

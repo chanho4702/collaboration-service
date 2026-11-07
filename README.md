@@ -110,7 +110,9 @@ pnpm start
 ```
 
 컨테이너는 내부 포트 `9150`을 사용하며 non-root `node` 사용자로 실행됩니다. `/health` HTTP 200과
-WebSocket은 같은 Hocuspocus listener를 공유합니다.
+WebSocket은 같은 Hocuspocus listener를 공유합니다. 같은 listener의 `GET /metrics`는 Prometheus 텍스트
+(기본 Node 프로세스 메트릭 + `collaboration_connections`·`collaboration_documents`, 라벨 `application`)를 내며
+내부망 전용입니다 — Alloy가 컨테이너 IP로 긁고, 프록시 헤더(`X-Forwarded-For`/`Forwarded`)가 붙은 요청은 404입니다.
 
 | 변수 | 기본값 | 설명 |
 |---|---:|---|
