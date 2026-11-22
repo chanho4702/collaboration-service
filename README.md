@@ -133,7 +133,7 @@ WebSocket은 같은 Hocuspocus listener를 공유합니다. 같은 listener의 `
 - 잘못된 schema, permission, room, 만료, Redis 장애는 모두 fail-closed합니다.
 - 한 connection은 하나의 awareness clientId만 소유하며 다른 connection의 cursor를 갱신할 수 없습니다.
 - 참여자 이름·ID·색상은 클라이언트 입력을 버리고 인증 context에서 다시 만들며 임의 awareness 필드도
-  다른 편집자에게 중계하지 않습니다.
+  다른 편집자에게 중계하지 않습니다(예외: 편집기 스키마 버전 `editorSchema` 정수 하나 — 옛 편집기 감지용).
 - 클라이언트 오류에는 실패 이유를 구분해 주지 않습니다.
 - 로그와 인증 context에는 raw ticket을 넣지 않습니다.
 

@@ -122,6 +122,16 @@ function remoteUser(value: unknown): { id: string; name: string; color: string }
 }
 
 /**
+ * 편집기 스키마 버전(WIKI-1) — wiki-front가 자기 TipTap 스키마 세대를 알리는 유일한 비신원 필드다.
+ * 옛 번들 탭은 새 노드를 모르면 y-prosemirror가 공유 문서에서 그 노드를 지우므로, 새 클라이언트가 옛 참여자를
+ * 알아보려면 이 값이 상대에게 도착해야 한다. 그 밖의 임의 필드는 계속 버린다. 1..1000 정수만 받고 아니면 뺀다.
+ */
+export const EDITOR_SCHEMA_FIELD = "editorSchema";
+function editorSchema(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 1000 ? value : null;
+}
+
+/**
  * 다른 노드가 Redis fan-out으로 보낸 awareness(높음-2). 그 노드가 자기 연결의 인증 context로 이미
  * `applyAuthoritativeAwareness`를 적용한 결과라 연결 context가 없다 — 예전에는 MISSING_CONTEXT로 전부
  * 버려 다른 노드 사람의 커서·참여자가 보이지 않았다.
@@ -147,7 +157,12 @@ export function applyRemoteAwareness(input: RemoteAwarenessInput): { dropped: nu
       states.delete(clientId);
       continue;
     }
-    states.set(clientId, { ...(cursor === null ? {} : { cursor }), user });
+    const schema = editorSchema(state.editorSchema);
+    states.set(clientId, {
+      ...(cursor === null ? {} : { cursor }),
+      user,
+      ...(schema === null ? {} : { [EDITOR_SCHEMA_FIELD]: schema }),
+    });
   }
   return { dropped };
 }
@@ -210,6 +225,7 @@ export function applyAuthoritativeAwareness(
 
     const cursor = cursorState(state.cursor);
     if (cursor === INVALID_CURSOR) return { accepted: false, reason: "INVALID_CURSOR" };
+    const schema = editorSchema(state.editorSchema);
     states.set(clientId, {
       ...(cursor === null ? {} : { cursor }),
       user: {
@@ -217,6 +233,7 @@ export function applyAuthoritativeAwareness(
         name: context.user.name,
         color: participantColor(context.user.id),
       },
+      ...(schema === null ? {} : { [EDITOR_SCHEMA_FIELD]: schema }),
     });
   }
 

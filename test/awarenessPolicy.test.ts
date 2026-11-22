@@ -54,6 +54,18 @@ describe("authoritative awareness policy", () => {
     });
   });
 
+  it("편집기 스키마 버전(editorSchema)은 1..1000 정수일 때만 통과시킨다 — WIKI-1 옛 편집기 감지", () => {
+    const ok = new Map<number, Record<string, unknown>>([[123, { cursor, editorSchema: 2 }]]);
+    expect(apply(ok)).toEqual({ accepted: true });
+    expect(ok.get(123)).toEqual({ cursor, user: { id: "42", name: "Alice", color: "#0c66e4" }, editorSchema: 2 });
+
+    for (const bad of ["2", 0, 1.5, 1001, -1, null, { v: 2 }]) {
+      const states = new Map<number, Record<string, unknown>>([[123, { editorSchema: bad }]]);
+      expect(apply(states)).toEqual({ accepted: true });
+      expect(states.get(123)).not.toHaveProperty("editorSchema");
+    }
+  });
+
   it("소유권을 아직 확인할 수 없는 초기 빈 awareness는 중계하지 않는다", () => {
     const states = new Map([[123, {}]]);
     expect(apply(states)).toEqual({ accepted: true });
@@ -146,6 +158,16 @@ describe("remote(다른 노드) awareness policy — 높음-2", () => {
 
     expect(applyRemoteAwareness({ states, localClientIds: new Set() })).toEqual({ dropped: 0 });
     expect(states.get(555)).toEqual({ cursor, user: { id: "42", name: "Alice", color: "#0c66e4" } });
+  });
+
+  it("다른 노드가 보낸 editorSchema도 형식이 맞을 때만 남긴다", () => {
+    const states = new Map<number, Record<string, unknown>>([
+      [1, { user: { id: "8", name: "Carol" }, editorSchema: 2 }],
+      [2, { user: { id: "9", name: "Dave" }, editorSchema: "2" }],
+    ]);
+    applyRemoteAwareness({ states, localClientIds: new Set() });
+    expect(states.get(1)).toEqual({ user: { id: "8", name: "Carol", color: expect.any(String) }, editorSchema: 2 });
+    expect(states.get(2)).not.toHaveProperty("editorSchema");
   });
 
   it("이 노드 연결이 소유한 clientId는 다른 노드가 덮어쓰지 못한다(되돌아온 echo 포함)", () => {

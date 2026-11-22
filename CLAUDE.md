@@ -80,6 +80,9 @@ pnpm start
 - **원격 awareness(높음-2)**: Redis로 온 awareness(origin `redis`, 연결 context 없음)는 `applyRemoteAwareness`로
   형식만 좁혀 통과시킨다(이 노드 연결 소유 clientId 덮어쓰기 금지, user는 id·name만 받아 색 재계산, cursor 검증).
   MISSING_CONTEXT로 전부 버리던 동작으로 되돌리지 않는다.
+- **편집기 스키마 버전(WIKI-1)**: 임의 awareness 필드는 버리되 `editorSchema`(1..1000 정수)만 로컬·원격 양쪽에서
+  통과시킨다. wiki-front가 옛 번들 참여자(새 노드를 지우는 y-prosemirror)를 알아보는 유일한 신호다 — 빼면 운영에서
+  두 명 이상 편집 시 "이전 편집기" 배너가 항상 뜬다.
 - **권한 재확인(높음-1)**: 채널 `wiki:collaboration:revoke`(`{"rooms":["page:<id>",...],"revokedAt":"<ISO>"}`,
   1~200개)를 받으면 그 room 연결을 close **4401**로 닫는다. 신호가 인증·로딩 중에 지나간 연결을 놓치지 않도록
   room별 최근 `revokedAt`(wiki-backend 커밋 후 시각)을 6분(티켓 TTL 상한 5분보다 길게) 보관하고, `connected`와
